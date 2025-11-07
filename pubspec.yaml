@@ -1,0 +1,33 @@
+name: college_bus_tracker
+description: A new Flutter project for college bus tracking.
+publish_to: "none" # Remove this line if you plan to publish
+
+version: 1.0.0+1
+
+environment:
+  sdk: ">=3.4.0 <4.0.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+  cupertino_icons: ^1.0.6
+  google_maps_flutter: ^2.6.0   # ✅ Google Maps
+  geolocator: ^12.0.0           # ✅ For current location (works on Web, Android, iOS)
+
+  # Firebase packages (compatible versions)
+  firebase_core: ^4.1.1         # ✅ Core Firebase
+  cloud_firestore: ^6.0.2       # ✅ Firestore database
+  firebase_auth: ^6.1.0        # ✅ Firebase Authentication (optional)
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+
+  flutter_lints: ^6.0.0
+
+flutter:
+  uses-material-design: true
+
+  assets:
+    - assets/images/splash.png
