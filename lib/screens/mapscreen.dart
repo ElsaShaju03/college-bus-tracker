@@ -1,9 +1,9 @@
 import 'dart:async';
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 import 'package:flutter_map/flutter_map.dart';
 import 'package:latlong2/latlong.dart';
 import 'package:geolocator/geolocator.dart';
+import 'package:cloud_firestore/cloud_firestore.dart'; // 🔹 Import Firestore
 
 class MapScreen extends StatefulWidget {
   // 🔹 Accept route data passed from BusScheduleScreen
@@ -23,27 +23,35 @@ class _MapScreenState extends State<MapScreen> {
   List<Map<String, dynamic>> _stops = [];
 
   // Map state
-  LatLng _center = const LatLng(8.5241, 76.9366); // Default (Trivandrum/Kazakuttam area)
+  LatLng _center = const LatLng(8.5241, 76.9366); // Default fallback
   double _zoom = 13.0;
 
-  // Device location
+  // Locations
   Position? _devicePosition;
-  LatLng? _deviceLatLng;
+  LatLng? _deviceLatLng; // You (Blue Dot)
+  LatLng? _busLocation;  // The Bus (Yellow Icon)
 
-  // Stream subscription
+  // Subscriptions
   StreamSubscription<Position>? _positionStreamSub;
+  StreamSubscription<DocumentSnapshot>? _busStreamSub;
   
   // Tapped Point
   LatLng? _tappedPoint;
+  
+  // Flag to center map only once
+  bool _hasCentered = false;
 
   @override
   void initState() {
     super.initState();
-    _loadRouteData(); // 🔹 Load data from Firestore
+    _loadRouteData(); // Load stops from the previous screen
     WidgetsBinding.instance.addPostFrameCallback((_) => _initLocationTracking());
+    
+    // 🔹 START LISTENING TO FIREBASE (Instead of WebSocket)
+    _startListeningToBus();
   }
 
-  // 🔹 Parse Firestore Data into Map Points
+  // 🔹 Parse Firestore Data (Stops) into Map Points
   void _loadRouteData() {
     if (widget.routeData != null && widget.routeData!['stops'] != null) {
       List<dynamic> rawStops = widget.routeData!['stops'];
@@ -52,7 +60,6 @@ class _MapScreenState extends State<MapScreen> {
       List<Map<String, dynamic>> cleanStops = [];
 
       for (var stop in rawStops) {
-        // Ensure lat/lng exist and parse them safely
         if (stop['lat'] != null && stop['lng'] != null) {
           try {
             double lat = double.parse(stop['lat'].toString());
@@ -75,8 +82,7 @@ class _MapScreenState extends State<MapScreen> {
         setState(() {
           _routePoints = points;
           _stops = cleanStops;
-          // Center map on the first stop if available
-          if (_routePoints.isNotEmpty) {
+          if (_routePoints.isNotEmpty && !_hasCentered) {
             _center = _routePoints.first; 
           }
         });
@@ -84,9 +90,38 @@ class _MapScreenState extends State<MapScreen> {
     }
   }
 
+  // 🔹 LISTEN TO LIVE BUS DATA FROM FIREBASE
+  void _startListeningToBus() {
+    // We listen to the specific document "test_bus" inside "bus_schedules"
+    // (This matches the ID we set in the ESP32 code)
+    _busStreamSub = FirebaseFirestore.instance
+        .collection('bus_schedules')
+        .doc('test_bus') 
+        .snapshots()
+        .listen((snapshot) {
+      
+      if (snapshot.exists && snapshot.data() != null) {
+        var data = snapshot.data() as Map<String, dynamic>;
+        
+        // Extract the fields sent by ESP32
+        if (data.containsKey('currentLat') && data.containsKey('currentLng')) {
+          double lat = data['currentLat'];
+          double lng = data['currentLng'];
+
+          if (mounted) {
+            setState(() {
+              _busLocation = LatLng(lat, lng);
+            });
+          }
+        }
+      }
+    }, onError: (e) => debugPrint("Firebase Error: $e"));
+  }
+
   @override
   void dispose() {
     _positionStreamSub?.cancel();
+    _busStreamSub?.cancel();
     super.dispose();
   }
 
@@ -96,13 +131,7 @@ class _MapScreenState extends State<MapScreen> {
     if (!serviceEnabled) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: const Text('Location services disabled.'),
-          action: SnackBarAction(
-            label: 'Enable',
-            onPressed: () => Geolocator.openLocationSettings(),
-          ),
-        ),
+        const SnackBar(content: Text('Location services disabled.')),
       );
     }
 
@@ -114,13 +143,33 @@ class _MapScreenState extends State<MapScreen> {
     if (permission == LocationPermission.denied || permission == LocationPermission.deniedForever) return;
 
     _startPositionStream();
+    _fetchCurrentOnce();
+  }
+
+  Future<void> _fetchCurrentOnce() async {
+    try {
+      Position pos = await Geolocator.getCurrentPosition(desiredAccuracy: LocationAccuracy.high);
+      if (mounted) {
+        setState(() {
+          _devicePosition = pos;
+          _deviceLatLng = LatLng(pos.latitude, pos.longitude);
+          
+          if (!_hasCentered) {
+            _mapController.move(_deviceLatLng!, 15);
+            _hasCentered = true;
+          }
+        });
+      }
+    } catch (e) {
+      debugPrint("Could not fetch initial location: $e");
+    }
   }
 
   void _startPositionStream() {
     _positionStreamSub?.cancel();
     const LocationSettings locationSettings = LocationSettings(
-      accuracy: LocationAccuracy.high,
-      distanceFilter: 10,
+      accuracy: LocationAccuracy.bestForNavigation,
+      distanceFilter: 0,
     );
 
     _positionStreamSub = Geolocator.getPositionStream(locationSettings: locationSettings).listen(
@@ -136,7 +185,7 @@ class _MapScreenState extends State<MapScreen> {
     );
   }
 
-  // 🔹 Build Markers (Stops + User Location)
+  // 🔹 Build Markers
   List<Marker> _buildMarkers() {
     final markers = <Marker>[];
 
@@ -160,6 +209,22 @@ class _MapScreenState extends State<MapScreen> {
       ));
     }
 
+    // 3. 🚌 LIVE BUS MARKER (From ESP32/Firebase)
+    if (_busLocation != null) {
+      markers.add(Marker(
+        point: _busLocation!,
+        width: 60, height: 60,
+        builder: (_) => Container(
+          decoration: BoxDecoration(
+            color: Colors.white,
+            shape: BoxShape.circle,
+            boxShadow: [BoxShadow(color: Colors.black26, blurRadius: 5)],
+          ),
+          child: const Icon(Icons.directions_bus, color: Color(0xFFFFD31A), size: 35),
+        ),
+      ));
+    }
+
     return markers;
   }
 
@@ -169,8 +234,6 @@ class _MapScreenState extends State<MapScreen> {
 
   @override
   Widget build(BuildContext context) {
-    final screenHeight = MediaQuery.of(context).size.height;
-
     // 🔹 THEME COLORS
     final bool isDarkMode = Theme.of(context).brightness == Brightness.dark;
     
@@ -186,12 +249,24 @@ class _MapScreenState extends State<MapScreen> {
       backgroundColor: bgColor,
       appBar: AppBar(
         title: Text(
-          widget.routeData?['busNumber'] ?? 'Bus Tracker (OSM)',
+          widget.routeData?['busNumber'] ?? 'Bus Tracker',
           style: TextStyle(color: textColor, fontWeight: FontWeight.bold),
         ),
         backgroundColor: bgColor,
         elevation: 0,
         iconTheme: IconThemeData(color: textColor),
+        actions: [
+          IconButton(
+            icon: const Icon(Icons.my_location),
+            onPressed: () {
+              if (_deviceLatLng != null) {
+                _mapController.move(_deviceLatLng!, 17);
+              } else {
+                _fetchCurrentOnce();
+              }
+            },
+          ),
+        ],
       ),
       body: Column(
         children: [
@@ -209,54 +284,21 @@ class _MapScreenState extends State<MapScreen> {
               ),
               child: ClipRRect(
                 borderRadius: BorderRadius.circular(20),
-                child: Stack(
+                child: FlutterMap(
+                  mapController: _mapController,
+                  options: MapOptions(center: _center, zoom: _zoom, onTap: _onMapTap),
                   children: [
-                    FlutterMap(
-                      mapController: _mapController,
-                      options: MapOptions(center: _center, zoom: _zoom, onTap: _onMapTap),
-                      children: [
-                        TileLayer(urlTemplate: 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', subdomains: const ['a', 'b', 'c']),
-                        
-                        // Draw Route Line
-                        if (_routePoints.isNotEmpty)
-                          PolylineLayer(
-                            polylines: [
-                              Polyline(points: _routePoints, strokeWidth: 4.0, color: Colors.blueAccent),
-                            ],
-                          ),
-                        
-                        MarkerLayer(markers: _buildMarkers()),
-                      ],
-                    ),
+                    TileLayer(urlTemplate: 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', subdomains: const ['a', 'b', 'c']),
                     
-                    // Zoom Controls inside Map
-                    Positioned(
-                      right: 10,
-                      top: 10,
-                      child: Column(
-                        children: [
-                          FloatingActionButton.small(
-                            heroTag: "zoomIn",
-                            onPressed: () {
-                              _zoom++;
-                              _mapController.move(_mapController.center, _zoom);
-                            },
-                            backgroundColor: Colors.white,
-                            child: const Icon(Icons.add, color: Colors.black),
-                          ),
-                          const SizedBox(height: 8),
-                          FloatingActionButton.small(
-                            heroTag: "zoomOut",
-                            onPressed: () {
-                              _zoom--;
-                              _mapController.move(_mapController.center, _zoom);
-                            },
-                            backgroundColor: Colors.white,
-                            child: const Icon(Icons.remove, color: Colors.black),
-                          ),
+                    // Draw Route Line
+                    if (_routePoints.isNotEmpty)
+                      PolylineLayer(
+                        polylines: [
+                          Polyline(points: _routePoints, strokeWidth: 4.0, color: Colors.blueAccent),
                         ],
                       ),
-                    ),
+                    
+                    MarkerLayer(markers: _buildMarkers()),
                   ],
                 ),
               ),
