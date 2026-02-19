@@ -1,425 +1,400 @@
 import 'dart:async';
 import 'package:flutter/material.dart';
-import 'package:flutter_map/flutter_map.dart';
-import 'package:latlong2/latlong.dart';
+import 'package:google_maps_flutter/google_maps_flutter.dart';
 import 'package:geolocator/geolocator.dart';
-import 'package:cloud_firestore/cloud_firestore.dart'; // 🔹 Import Firestore
+import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:flutter_local_notifications/flutter_local_notifications.dart';
+import 'package:url_launcher/url_launcher.dart';
+import 'package:flutter_polyline_points/flutter_polyline_points.dart';
 
 class MapScreen extends StatefulWidget {
-  // 🔹 Accept route data passed from BusScheduleScreen
   final Map<String, dynamic>? routeData;
+  final String? busId;
+  final bool isAdmin;
 
-  const MapScreen({super.key, this.routeData});
+  const MapScreen({
+    super.key,
+    this.routeData,
+    this.busId,
+    this.isAdmin = false,
+  });
 
   @override
   State<MapScreen> createState() => _MapScreenState();
 }
 
 class _MapScreenState extends State<MapScreen> {
-  final MapController _mapController = MapController();
+  final Completer<GoogleMapController> _controller = Completer();
+  final FlutterLocalNotificationsPlugin _notificationsPlugin = FlutterLocalNotificationsPlugin();
 
-  // 🔹 Dynamic Route Data
-  List<LatLng> _routePoints = [];
+  // 🔹 API Key (Ensure this is valid and has Directions API enabled)
+  final String googleApiKey = "AIzaSyAY72QWoQntO2YvzdoifK397WcHWr5zkZo";
+
+  // Map Component Sets
+  Set<Marker> _markers = {};
+  Set<Polyline> _polylines = {};
+  Set<Polygon> _polygons = {};
+  
+  List<LatLng> _roadPoints = []; 
+  List<LatLng> _polygonVertices = []; 
   List<Map<String, dynamic>> _stops = [];
 
-  // Map state
-  LatLng _center = const LatLng(8.5241, 76.9366); // Default fallback
-  double _zoom = 13.0;
-
-  // Locations
-  Position? _devicePosition;
-  LatLng? _deviceLatLng; // You (Blue Dot)
-  LatLng? _busLocation;  // The Bus (Yellow Icon)
-
-  // Subscriptions
-  StreamSubscription<Position>? _positionStreamSub;
-  StreamSubscription<DocumentSnapshot>? _busStreamSub;
-  
-  // Tapped Point
-  LatLng? _tappedPoint;
-  
-  // Flag to center map only once
+  // Live Tracking Variables
+  LatLng? _busLocation;
+  LatLng? _deviceLatLng;
+  double _busHeading = 0.0;
+  double _busSpeed = 0.0;
   bool _hasCentered = false;
+  bool _isViolatingRoute = false;
+
+  // 🔹 STREAMS
+  StreamSubscription<DocumentSnapshot>? _busStreamSub;
+  StreamSubscription<Position>? _positionStreamSub;
 
   @override
   void initState() {
     super.initState();
-    _loadRouteData(); // Load stops from the previous screen
-    WidgetsBinding.instance.addPostFrameCallback((_) => _initLocationTracking());
-    
-    // 🔹 START LISTENING TO FIREBASE (Instead of WebSocket)
+    _loadRouteData();
+    _initNotifications();
+    _initLocationTracking();
     _startListeningToBus();
   }
 
-  // 🔹 Parse Firestore Data (Stops) into Map Points
-  void _loadRouteData() {
-    if (widget.routeData != null && widget.routeData!['stops'] != null) {
-      List<dynamic> rawStops = widget.routeData!['stops'];
-      
-      List<LatLng> points = [];
-      List<Map<String, dynamic>> cleanStops = [];
-
-      for (var stop in rawStops) {
-        if (stop['lat'] != null && stop['lng'] != null) {
-          try {
-            double lat = double.parse(stop['lat'].toString());
-            double lng = double.parse(stop['lng'].toString());
-            LatLng point = LatLng(lat, lng);
-            
-            points.add(point);
-            cleanStops.add({
-              "name": stop['stopName'] ?? "Stop",
-              "time": stop['time'] ?? "--:--",
-              "latlng": point,
-            });
-          } catch (e) {
-            debugPrint("Error parsing stop data: $e");
-          }
-        }
-      }
-
-      if (mounted) {
-        setState(() {
-          _routePoints = points;
-          _stops = cleanStops;
-          if (_routePoints.isNotEmpty && !_hasCentered) {
-            _center = _routePoints.first; 
-          }
-        });
-      }
-    }
-  }
-
-  // 🔹 LISTEN TO LIVE BUS DATA FROM FIREBASE
-  void _startListeningToBus() {
-    // We listen to the specific document "test_bus" inside "bus_schedules"
-    // (This matches the ID we set in the ESP32 code)
-    _busStreamSub = FirebaseFirestore.instance
-        .collection('bus_schedules')
-        .doc('test_bus') 
-        .snapshots()
-        .listen((snapshot) {
-      
-      if (snapshot.exists && snapshot.data() != null) {
-        var data = snapshot.data() as Map<String, dynamic>;
-        
-        // Extract the fields sent by ESP32
-        if (data.containsKey('currentLat') && data.containsKey('currentLng')) {
-          double lat = data['currentLat'];
-          double lng = data['currentLng'];
-
-          if (mounted) {
-            setState(() {
-              _busLocation = LatLng(lat, lng);
-            });
-          }
-        }
-      }
-    }, onError: (e) => debugPrint("Firebase Error: $e"));
-  }
-
   @override
-  void dispose() {
-    _positionStreamSub?.cancel();
+  void dispose() { 
     _busStreamSub?.cancel();
-    super.dispose();
+    _positionStreamSub?.cancel(); 
+    super.dispose(); 
   }
 
-  // === LOCATION HANDLING ===
-  Future<void> _initLocationTracking() async {
-    bool serviceEnabled = await Geolocator.isLocationServiceEnabled();
-    if (!serviceEnabled) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Location services disabled.')),
-      );
-    }
-
-    LocationPermission permission = await Geolocator.checkPermission();
-    if (permission == LocationPermission.denied) {
-      permission = await Geolocator.requestPermission();
-    }
-
-    if (permission == LocationPermission.denied || permission == LocationPermission.deniedForever) return;
-
-    _startPositionStream();
-    _fetchCurrentOnce();
+  // ---------------------------------------------------
+  // 🔹 1. CONVEX HULL ALGORITHM (Geofence Creation)
+  // ---------------------------------------------------
+  
+  // Cross product to find orientation of ordered triplet (p, q, r)
+  double _crossProduct(LatLng o, LatLng a, LatLng b) {
+    return (a.longitude - o.longitude) * (b.latitude - o.latitude) -
+           (a.latitude - o.latitude) * (b.longitude - o.longitude);
   }
 
-  Future<void> _fetchCurrentOnce() async {
+  // Generate the Convex Hull (Monotone Chain Algorithm)
+  List<LatLng> _computeConvexHull(List<LatLng> points) {
+    if (points.length <= 2) return points;
+
+    // 1. Sort points by X (longitude), then Y (latitude)
+    points.sort((a, b) {
+      int comp = a.longitude.compareTo(b.longitude);
+      if (comp == 0) return a.latitude.compareTo(b.latitude);
+      return comp;
+    });
+
+    List<LatLng> lower = [];
+    for (var p in points) {
+      while (lower.length >= 2 && _crossProduct(lower[lower.length - 2], lower.last, p) <= 0) {
+        lower.removeLast();
+      }
+      lower.add(p);
+    }
+
+    List<LatLng> upper = [];
+    for (var p in points.reversed) {
+      while (upper.length >= 2 && _crossProduct(upper[upper.length - 2], upper.last, p) <= 0) {
+        upper.removeLast();
+      }
+      upper.add(p);
+    }
+
+    lower.removeLast();
+    upper.removeLast();
+    return [...lower, ...upper];
+  }
+
+  void _generateAuthorizedZone(List<LatLng> stopPoints) {
+    if (stopPoints.length < 2) return;
+
+    // 1. Expand points: Add a buffer around each stop so the hull isn't too tight
+    // 0.004 degrees is roughly 400-500 meters
+    double buffer = 0.004; 
+    List<LatLng> expandedPoints = [];
+
+    for (var p in stopPoints) {
+      expandedPoints.add(p); // Center
+      expandedPoints.add(LatLng(p.latitude + buffer, p.longitude)); // North
+      expandedPoints.add(LatLng(p.latitude - buffer, p.longitude)); // South
+      expandedPoints.add(LatLng(p.latitude, p.longitude + buffer)); // East
+      expandedPoints.add(LatLng(p.latitude, p.longitude - buffer)); // West
+    }
+
+    // 2. Calculate Hull
+    _polygonVertices = _computeConvexHull(expandedPoints);
+
+    // 3. Draw Polygon (Only visible to Admin)
+    if (widget.isAdmin) {
+      setState(() {
+        _polygons = {
+          Polygon(
+            polygonId: const PolygonId("convex_hull_geofence"),
+            points: _polygonVertices,
+            strokeWidth: 2,
+            strokeColor: _isViolatingRoute ? Colors.red : Colors.green,
+            fillColor: _isViolatingRoute ? Colors.red.withOpacity(0.15) : Colors.green.withOpacity(0.1),
+          )
+        };
+      });
+    }
+  }
+
+  // ---------------------------------------------------
+  // 🔹 2. SECURITY CHECK (Point in Polygon)
+  // ---------------------------------------------------
+  bool _isPointInPolygon(LatLng point, List<LatLng> polygon) {
+    int i, j = polygon.length - 1;
+    bool oddNodes = false;
+    double x = point.longitude;
+    double y = point.latitude;
+    for (i = 0; i < polygon.length; i++) {
+      if ((polygon[i].latitude < y && polygon[j].latitude >= y ||
+              polygon[j].latitude < y && polygon[i].latitude >= y) &&
+          (polygon[i].longitude <= x || polygon[j].longitude <= x)) {
+        if (polygon[i].longitude + (y - polygon[i].latitude) / (polygon[j].latitude - polygon[i].latitude) * (polygon[j].longitude - polygon[i].longitude) < x) {
+          oddNodes = !oddNodes;
+        }
+      }
+      j = i;
+    }
+    return oddNodes;
+  }
+
+  void _checkSecurityStatus(LatLng busPos) {
+    if (_polygonVertices.isEmpty) return;
+
+    bool isInside = _isPointInPolygon(busPos, _polygonVertices);
+
+    if (!isInside) {
+       // Only update state if changing status to avoid spamming setState
+       if (!_isViolatingRoute) {
+          setState(() => _isViolatingRoute = true);
+          _showNotification("🚨 ROUTE VIOLATION", "Vehicle ${widget.routeData?['busNumber'] ?? ''} is OUTSIDE the authorized zone!");
+       }
+    } else {
+       if (_isViolatingRoute) {
+          setState(() => _isViolatingRoute = false);
+       }
+    }
+    
+    // Refresh the visual color of the polygon
+    _generateAuthorizedZone(_extractStopCoords());
+  }
+
+  // ---------------------------------------------------
+  // 🔹 3. FIRESTORE & DATA LOGIC
+  // ---------------------------------------------------
+  List<LatLng> _extractStopCoords() {
+    if (widget.routeData?['stops'] == null) return [];
+    return (widget.routeData!['stops'] as List).map((s) => 
+      LatLng(double.parse(s['lat'].toString()), double.parse(s['lng'].toString()))
+    ).toList();
+  }
+
+  void _loadRouteData() async {
+    if (widget.routeData != null && widget.routeData!['stops'] != null) {
+      List<LatLng> stopPoints = _extractStopCoords();
+      
+      setState(() {
+        _stops = (widget.routeData!['stops'] as List).map((s) => {
+          "name": s['stopName'] ?? "Stop",
+          "time": s['time'] ?? "--:--"
+        }).toList();
+        
+        // BUILD CONVEX HULL GEOFENCE
+        _generateAuthorizedZone(stopPoints); 
+      });
+
+      await _fetchRoadSnappedRoute(stopPoints);
+    }
+  }
+
+  Future<void> _fetchRoadSnappedRoute(List<LatLng> stopPoints) async {
+    PolylinePoints polylinePoints = PolylinePoints(apiKey: googleApiKey);
     try {
-      Position pos = await Geolocator.getCurrentPosition(desiredAccuracy: LocationAccuracy.high);
-      if (mounted) {
+      PolylineResult result = await polylinePoints.getRouteBetweenCoordinates(
+        request: PolylineRequest(
+          origin: PointLatLng(stopPoints.first.latitude, stopPoints.first.longitude),
+          destination: PointLatLng(stopPoints.last.latitude, stopPoints.last.longitude),
+          mode: TravelMode.driving,
+        ),
+      );
+      if (result.points.isNotEmpty) {
         setState(() {
-          _devicePosition = pos;
-          _deviceLatLng = LatLng(pos.latitude, pos.longitude);
-          
-          if (!_hasCentered) {
-            _mapController.move(_deviceLatLng!, 15);
-            _hasCentered = true;
-          }
+          _roadPoints = result.points.map((p) => LatLng(p.latitude, p.longitude)).toList();
+          _updateMapVisuals();
         });
       }
     } catch (e) {
-      debugPrint("Could not fetch initial location: $e");
+      setState(() { _roadPoints = stopPoints; _updateMapVisuals(); });
     }
   }
 
-  void _startPositionStream() {
-    _positionStreamSub?.cancel();
-    const LocationSettings locationSettings = LocationSettings(
-      accuracy: LocationAccuracy.bestForNavigation,
-      distanceFilter: 0,
-    );
+  void _startListeningToBus() {
+    String? linkedDeviceId = widget.routeData?['deviceId'];
+    String docId = linkedDeviceId ?? (widget.busId ?? 'test_bus');
 
-    _positionStreamSub = Geolocator.getPositionStream(locationSettings: locationSettings).listen(
-      (Position pos) {
-        if (mounted) {
-          setState(() {
-            _devicePosition = pos;
-            _deviceLatLng = LatLng(pos.latitude, pos.longitude);
-          });
+    _busStreamSub = FirebaseFirestore.instance.collection('devices').doc(docId).snapshots().listen((snapshot) {
+      if (snapshot.exists && snapshot.data() != null) {
+        var data = snapshot.data() as Map<String, dynamic>;
+        if (data.containsKey('currentLat')) {
+          LatLng newPos = LatLng((data['currentLat'] as num).toDouble(), (data['currentLng'] as num).toDouble());
+          
+          _checkSecurityStatus(newPos);
+
+          if (mounted) {
+            setState(() {
+              _busLocation = newPos;
+              _busHeading = (data['heading'] ?? 0.0).toDouble();
+              _busSpeed = (data['speed'] ?? 0.0).toDouble();
+              _updateMapVisuals();
+            });
+            if (!_hasCentered) { _fitBounds(); _hasCentered = true; }
+          }
         }
-      },
-      onError: (e) => debugPrint(e.toString()),
-    );
+      }
+    });
   }
 
-  // 🔹 Build Markers
-  List<Marker> _buildMarkers() {
-    final markers = <Marker>[];
+  // ---------------------------------------------------
+  // 🔹 4. RENDERING & UI
+  // ---------------------------------------------------
+  void _updateMapVisuals() {
+    Set<Marker> newMarkers = {};
+    List<LatLng> stopCoords = _extractStopCoords();
 
-    // 1. Bus Stops (Red Pins)
-    for (int i = 0; i < _stops.length; i++) {
-      markers.add(Marker(
-        point: _stops[i]['latlng'],
-        width: 40,
-        height: 40,
-        builder: (_) => const Icon(Icons.location_on, color: Colors.red, size: 30),
+    // Stop Markers
+    for (int i = 0; i < stopCoords.length; i++) {
+      newMarkers.add(Marker(
+        markerId: MarkerId('s$i'),
+        position: stopCoords[i],
+        icon: BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueRose),
+        infoWindow: InfoWindow(title: _stops[i]['name']),
       ));
     }
 
-    // 2. User Location (Blue Dot)
-    if (_deviceLatLng != null) {
-      markers.add(Marker(
-        point: _deviceLatLng!,
-        width: 48,
-        height: 48,
-        builder: (_) => const Icon(Icons.my_location, size: 30, color: Colors.blue),
-      ));
-    }
-
-    // 3. 🚌 LIVE BUS MARKER (From ESP32/Firebase)
+    // Bus Marker
     if (_busLocation != null) {
-      markers.add(Marker(
-        point: _busLocation!,
-        width: 60, height: 60,
-        builder: (_) => Container(
-          decoration: BoxDecoration(
-            color: Colors.white,
-            shape: BoxShape.circle,
-            boxShadow: [BoxShadow(color: Colors.black26, blurRadius: 5)],
-          ),
-          child: const Icon(Icons.directions_bus, color: Color(0xFFFFD31A), size: 35),
-        ),
+      newMarkers.add(Marker(
+        markerId: const MarkerId('live_bus'),
+        position: _busLocation!,
+        rotation: _busHeading,
+        anchor: const Offset(0.5, 0.5),
+        icon: BitmapDescriptor.defaultMarkerWithHue(60.0),
+        infoWindow: InfoWindow(title: "Bus: ${widget.routeData?['busNumber']}", snippet: "${_busSpeed.toStringAsFixed(1)} km/h"),
+        zIndex: 5,
       ));
     }
 
-    return markers;
+    setState(() { 
+      _markers = newMarkers; 
+      _polylines = {
+        Polyline(
+          polylineId: const PolylineId('road_line'),
+          points: _roadPoints.isEmpty ? _extractStopCoords() : _roadPoints,
+          color: Colors.blueAccent,
+          width: 5,
+        )
+      };
+    });
   }
 
-  void _onMapTap(TapPosition tp, LatLng latlng) {
-    setState(() => _tappedPoint = latlng);
+  Future<void> _launchLiveNavigation() async {
+    if (_busLocation == null) return;
+    final Uri url = Uri.parse("https://www.google.com/maps/dir/?api=1&destination=${_busLocation!.latitude},${_busLocation!.longitude}&travelmode=driving");
+    if (await canLaunchUrl(url)) await launchUrl(url, mode: LaunchMode.externalApplication);
+  }
+
+  Future<void> _initNotifications() async {
+    const AndroidInitializationSettings androidSettings = AndroidInitializationSettings('@mipmap/ic_launcher');
+    await _notificationsPlugin.initialize(const InitializationSettings(android: androidSettings));
+  }
+
+  Future<void> _showNotification(String title, String body) async {
+    const AndroidNotificationDetails details = AndroidNotificationDetails('bus_alert', 'Alerts', importance: Importance.max, priority: Priority.high, color: Colors.red);
+    await _notificationsPlugin.show(0, title, body, const NotificationDetails(android: details));
+  }
+
+  Future<void> _initLocationTracking() async {
+    LocationPermission p = await Geolocator.requestPermission();
+    if (p != LocationPermission.denied && p != LocationPermission.deniedForever) {
+      _positionStreamSub = Geolocator.getPositionStream().listen((pos) {
+        if (mounted) setState(() { _deviceLatLng = LatLng(pos.latitude, pos.longitude); });
+      });
+    }
+  }
+
+  Future<void> _fitBounds() async {
+    if (_controller.isCompleted && _busLocation != null) {
+      final GoogleMapController c = await _controller.future;
+      c.animateCamera(CameraUpdate.newLatLngZoom(_busLocation!, 15));
+    }
   }
 
   @override
   Widget build(BuildContext context) {
-    // 🔹 THEME COLORS
-    final bool isDarkMode = Theme.of(context).brightness == Brightness.dark;
-    
-    // Background: Black (Dark Mode) or #8E9991 (Light Mode)
-    final Color bgColor = isDarkMode ? Colors.black : const Color(0xFF8E9991);
-    final Color textColor = isDarkMode ? Colors.white : Colors.black;
-    
-    // Bottom Sheet (Timeline) Colors
-    final Color sheetColor = isDarkMode ? const Color(0xFF1A1A1A) : Colors.white;
-    final Color sheetText = isDarkMode ? Colors.white : Colors.black;
-
+    final bool isDark = Theme.of(context).brightness == Brightness.dark;
     return Scaffold(
-      backgroundColor: bgColor,
-      appBar: AppBar(
-        title: Text(
-          widget.routeData?['busNumber'] ?? 'Bus Tracker',
-          style: TextStyle(color: textColor, fontWeight: FontWeight.bold),
-        ),
-        backgroundColor: bgColor,
-        elevation: 0,
-        iconTheme: IconThemeData(color: textColor),
-        actions: [
-          IconButton(
-            icon: const Icon(Icons.my_location),
-            onPressed: () {
-              if (_deviceLatLng != null) {
-                _mapController.move(_deviceLatLng!, 17);
-              } else {
-                _fetchCurrentOnce();
-              }
-            },
-          ),
-        ],
+      appBar: AppBar(title: Text(widget.routeData?['busNumber'] ?? 'Bus Tracker')),
+      floatingActionButton: FloatingActionButton.extended(
+        onPressed: _launchLiveNavigation, 
+        icon: const Icon(Icons.navigation), 
+        label: const Text("Navigate to Bus"),
+        backgroundColor: _isViolatingRoute ? Colors.red : Colors.blueAccent,
       ),
       body: Column(
         children: [
-          // 🔹 1. TOP HALF: MAP
-          Expanded(
-            flex: 1, // 50% height
-            child: Container(
-              margin: const EdgeInsets.all(16),
-              decoration: BoxDecoration(
-                borderRadius: BorderRadius.circular(20),
-                border: Border.all(color: Colors.black26, width: 1),
-                boxShadow: [
-                  BoxShadow(color: Colors.black.withOpacity(0.2), blurRadius: 8)
-                ],
-              ),
-              child: ClipRRect(
-                borderRadius: BorderRadius.circular(20),
-                child: FlutterMap(
-                  mapController: _mapController,
-                  options: MapOptions(center: _center, zoom: _zoom, onTap: _onMapTap),
-                  children: [
-                    TileLayer(urlTemplate: 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', subdomains: const ['a', 'b', 'c']),
-                    
-                    // Draw Route Line
-                    if (_routePoints.isNotEmpty)
-                      PolylineLayer(
-                        polylines: [
-                          Polyline(points: _routePoints, strokeWidth: 4.0, color: Colors.blueAccent),
-                        ],
-                      ),
-                    
-                    MarkerLayer(markers: _buildMarkers()),
-                  ],
-                ),
-              ),
-            ),
-          ),
-
-          // 🔹 2. BOTTOM HALF: TIMELINE (Stops)
-          Expanded(
-            flex: 1, // 50% height
-            child: Container(
+          // RED ALERT BAR
+          if (_isViolatingRoute)
+            Container(
               width: double.infinity,
-              decoration: BoxDecoration(
-                color: sheetColor, // White or Dark Grey
-                borderRadius: const BorderRadius.only(
-                  topLeft: Radius.circular(30),
-                  topRight: Radius.circular(30),
-                ),
-              ),
-              child: Column(
-                children: [
-                  // Title Header
-                  Padding(
-                    padding: const EdgeInsets.all(20.0),
-                    child: Row(
-                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                      children: [
-                        Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Text(
-                              widget.routeData?['routeTitle'] ?? "Route Details",
-                              style: TextStyle(color: sheetText, fontSize: 20, fontWeight: FontWeight.bold),
-                            ),
-                            if (_stops.isNotEmpty)
-                              Text("${_stops.length} Stops", style: TextStyle(color: sheetText.withOpacity(0.6))),
-                          ],
-                        ),
-                        Icon(Icons.share, color: sheetText.withOpacity(0.6)),
-                      ],
-                    ),
-                  ),
-                  Divider(color: Colors.grey.withOpacity(0.3), height: 1),
-
-                  // Stops List (Timeline)
-                  Expanded(
-                    child: _stops.isEmpty
-                        ? Center(child: Text("No route stops available.", style: TextStyle(color: sheetText)))
-                        : ListView.builder(
-                            padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 20),
-                            itemCount: _stops.length,
-                            itemBuilder: (context, index) {
-                              final stop = _stops[index];
-                              final isLast = index == _stops.length - 1;
-
-                              return IntrinsicHeight(
-                                child: Row(
-                                  crossAxisAlignment: CrossAxisAlignment.start,
-                                  children: [
-                                    // Time
-                                    SizedBox(
-                                      width: 70,
-                                      child: Text(
-                                        stop['time'] ?? "--:--",
-                                        style: TextStyle(color: sheetText, fontWeight: FontWeight.bold, fontSize: 14),
-                                      ),
-                                    ),
-
-                                    // Line & Dot
-                                    Column(
-                                      children: [
-                                        Container(
-                                          width: 14,
-                                          height: 14,
-                                          decoration: BoxDecoration(
-                                            color: Colors.blueAccent, // Active color
-                                            shape: BoxShape.circle,
-                                            border: Border.all(color: sheetColor, width: 2),
-                                          ),
-                                        ),
-                                        if (!isLast)
-                                          Expanded(
-                                            child: Container(
-                                              width: 2,
-                                              color: Colors.grey.withOpacity(0.3),
-                                            ),
-                                          ),
-                                      ],
-                                    ),
-
-                                    const SizedBox(width: 15),
-
-                                    // Stop Details
-                                    Expanded(
-                                      child: Padding(
-                                        padding: const EdgeInsets.only(bottom: 30),
-                                        child: Column(
-                                          crossAxisAlignment: CrossAxisAlignment.start,
-                                          children: [
-                                            Text(
-                                              stop['name'] ?? "Stop Name",
-                                              style: TextStyle(color: sheetText, fontSize: 16, fontWeight: FontWeight.w600),
-                                            ),
-                                            const SizedBox(height: 4),
-                                            Text(
-                                              "Stop #${index + 1}",
-                                              style: TextStyle(color: sheetText.withOpacity(0.5), fontSize: 12),
-                                            ),
-                                          ],
-                                        ),
-                                      ),
-                                    ),
-                                  ],
-                                ),
-                              );
-                            },
-                          ),
-                  ),
-                ],
-              ),
+              color: Colors.red,
+              padding: const EdgeInsets.all(10),
+              child: const Center(child: Text("VEHICLE OUTSIDE AUTHORIZED AREA", style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold))),
             ),
-          ),
+
+          Expanded(flex: 7, child: GoogleMap(
+            initialCameraPosition: const CameraPosition(target: LatLng(8.5576, 76.8604), zoom: 14),
+            markers: _markers,
+            polylines: _polylines,
+            // 🔹 Show Polygon ONLY for Admin
+            polygons: widget.isAdmin ? _polygons : {}, 
+            myLocationEnabled: true,
+            onMapCreated: (c) => _controller.complete(c),
+          )),
+
+          Expanded(flex: 3, child: Container(
+            color: isDark ? const Color(0xFF121212) : Colors.white,
+            child: Column(
+              children: [
+                // Live Status Badge
+                Container(
+                  margin: const EdgeInsets.symmetric(vertical: 10),
+                  padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
+                  decoration: BoxDecoration(
+                    color: _busSpeed > 2 ? Colors.green.withOpacity(0.1) : Colors.orange.withOpacity(0.1),
+                    borderRadius: BorderRadius.circular(20),
+                  ),
+                  child: Text(
+                    _busSpeed > 2 ? "STATUS: MOVING (${_busSpeed.toStringAsFixed(1)} KM/H)" : "STATUS: IDLE",
+                    style: TextStyle(color: _busSpeed > 2 ? Colors.green : Colors.orange, fontWeight: FontWeight.bold),
+                  ),
+                ),
+                Expanded(child: ListView.builder(
+                  itemCount: _stops.length,
+                  itemBuilder: (context, i) => ListTile(
+                    leading: Text(_stops[i]['time'], style: const TextStyle(fontWeight: FontWeight.bold)),
+                    title: Text(_stops[i]['name']),
+                  ),
+                )),
+              ],
+            ),
+          )),
         ],
       ),
     );

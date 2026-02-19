@@ -12,10 +12,14 @@ class AddBusScreen extends StatefulWidget {
 class _AddBusScreenState extends State<AddBusScreen> {
   final _formKey = GlobalKey<FormState>();
 
+  // Controllers
   final TextEditingController busNumberController = TextEditingController();
   final TextEditingController routeNameController = TextEditingController();
   final TextEditingController startPointController = TextEditingController();
   final TextEditingController endPointController = TextEditingController();
+  
+  // 🔹 NEW: Controller for linking the ESP32
+  final TextEditingController deviceIdController = TextEditingController(); 
 
   bool isLoading = false;
 
@@ -28,19 +32,17 @@ class _AddBusScreenState extends State<AddBusScreen> {
     try {
       final user = FirebaseAuth.instance.currentUser;
 
-      // 🔹 CORRECTED: Uses 'bus_schedules' to match your Schedule Screen
       await FirebaseFirestore.instance.collection('bus_schedules').add({
         "busNumber": busNumberController.text.trim(),
-        
-        // 🔹 CORRECTED: Mapped 'routeName' input to 'routeTitle' field used in busschedule.dart
         "routeTitle": routeNameController.text.trim(),
-        
         "startPoint": startPointController.text.trim(),
         "endPoint": endPointController.text.trim(),
         
-        // 🔹 IMPORTANT: Add empty stops list so MapScreen doesn't crash
-        "stops": [], 
+        // 🔹 SAVE THE DEVICE LINK
+        // This must match what is in your ESP32 code (e.g. "device_01")
+        "deviceId": deviceIdController.text.trim(), 
         
+        "stops": [], 
         "createdAt": FieldValue.serverTimestamp(),
         "createdBy": user?.uid,
       });
@@ -101,6 +103,15 @@ class _AddBusScreenState extends State<AddBusScreen> {
                 label: "End Point",
                 hint: "College",
               ),
+              const SizedBox(height: 16),
+
+              // 🔹 NEW DEVICE ID FIELD
+              _inputField(
+                controller: deviceIdController,
+                label: "GPS Device ID",
+                hint: "e.g. device_01", // Should match ESP32 code
+              ),
+              
               const SizedBox(height: 30),
 
               /// 🔹 SAVE BUTTON
@@ -144,7 +155,7 @@ class _AddBusScreenState extends State<AddBusScreen> {
         labelText: label,
         hintText: hint,
         filled: true,
-        fillColor: Colors.white, // Ensure white background even in dark mode
+        fillColor: Colors.white, 
         border: OutlineInputBorder(
           borderRadius: BorderRadius.circular(12),
         ),

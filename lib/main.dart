@@ -29,7 +29,6 @@ class CollegeBusTrackerApp extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    // 🔹 Listen to the themeNotifier
     return ValueListenableBuilder<ThemeMode>(
       valueListenable: themeNotifier,
       builder: (context, currentMode, child) {
