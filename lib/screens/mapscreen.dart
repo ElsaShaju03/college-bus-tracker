@@ -27,7 +27,7 @@ class _MapScreenState extends State<MapScreen> {
   final Completer<GoogleMapController> _controller = Completer();
   final FlutterLocalNotificationsPlugin _notificationsPlugin = FlutterLocalNotificationsPlugin();
 
-  // 🔹 API Key (Ensure this is valid and has Directions API enabled)
+  // 🔹 API Key
   final String googleApiKey = "AIzaSyAY72QWoQntO2YvzdoifK397WcHWr5zkZo";
 
   // Map Component Sets
@@ -71,17 +71,16 @@ class _MapScreenState extends State<MapScreen> {
   // 🔹 1. CONVEX HULL ALGORITHM (Geofence Creation)
   // ---------------------------------------------------
   
-  // Cross product to find orientation of ordered triplet (p, q, r)
+  // Cross product to find orientation
   double _crossProduct(LatLng o, LatLng a, LatLng b) {
     return (a.longitude - o.longitude) * (b.latitude - o.latitude) -
            (a.latitude - o.latitude) * (b.longitude - o.longitude);
   }
 
-  // Generate the Convex Hull (Monotone Chain Algorithm)
+  // Generate the Convex Hull
   List<LatLng> _computeConvexHull(List<LatLng> points) {
     if (points.length <= 2) return points;
 
-    // 1. Sort points by X (longitude), then Y (latitude)
     points.sort((a, b) {
       int comp = a.longitude.compareTo(b.longitude);
       if (comp == 0) return a.latitude.compareTo(b.latitude);
@@ -112,36 +111,33 @@ class _MapScreenState extends State<MapScreen> {
   void _generateAuthorizedZone(List<LatLng> stopPoints) {
     if (stopPoints.length < 2) return;
 
-    // 1. Expand points: Add a buffer around each stop so the hull isn't too tight
-    // 0.004 degrees is roughly 400-500 meters
+    // 1. Expand points (Buffer)
     double buffer = 0.004; 
     List<LatLng> expandedPoints = [];
 
     for (var p in stopPoints) {
-      expandedPoints.add(p); // Center
-      expandedPoints.add(LatLng(p.latitude + buffer, p.longitude)); // North
-      expandedPoints.add(LatLng(p.latitude - buffer, p.longitude)); // South
-      expandedPoints.add(LatLng(p.latitude, p.longitude + buffer)); // East
-      expandedPoints.add(LatLng(p.latitude, p.longitude - buffer)); // West
+      expandedPoints.add(p); 
+      expandedPoints.add(LatLng(p.latitude + buffer, p.longitude)); 
+      expandedPoints.add(LatLng(p.latitude - buffer, p.longitude)); 
+      expandedPoints.add(LatLng(p.latitude, p.longitude + buffer)); 
+      expandedPoints.add(LatLng(p.latitude, p.longitude - buffer)); 
     }
 
     // 2. Calculate Hull
     _polygonVertices = _computeConvexHull(expandedPoints);
 
-    // 3. Draw Polygon (Only visible to Admin)
-    if (widget.isAdmin) {
-      setState(() {
-        _polygons = {
-          Polygon(
-            polygonId: const PolygonId("convex_hull_geofence"),
-            points: _polygonVertices,
-            strokeWidth: 2,
-            strokeColor: _isViolatingRoute ? Colors.red : Colors.green,
-            fillColor: _isViolatingRoute ? Colors.red.withOpacity(0.15) : Colors.green.withOpacity(0.1),
-          )
-        };
-      });
-    }
+    // 3. Draw Polygon (VISIBLE TO ALL for Testing)
+    setState(() {
+      _polygons = {
+        Polygon(
+          polygonId: const PolygonId("convex_hull_geofence"),
+          points: _polygonVertices,
+          strokeWidth: 2,
+          strokeColor: _isViolatingRoute ? Colors.red : Colors.green,
+          fillColor: _isViolatingRoute ? Colors.red.withOpacity(0.15) : Colors.green.withOpacity(0.1),
+        )
+      };
+    });
   }
 
   // ---------------------------------------------------
@@ -171,7 +167,6 @@ class _MapScreenState extends State<MapScreen> {
     bool isInside = _isPointInPolygon(busPos, _polygonVertices);
 
     if (!isInside) {
-       // Only update state if changing status to avoid spamming setState
        if (!_isViolatingRoute) {
           setState(() => _isViolatingRoute = true);
           _showNotification("🚨 ROUTE VIOLATION", "Vehicle ${widget.routeData?['busNumber'] ?? ''} is OUTSIDE the authorized zone!");
@@ -182,7 +177,7 @@ class _MapScreenState extends State<MapScreen> {
        }
     }
     
-    // Refresh the visual color of the polygon
+    // Refresh visual color
     _generateAuthorizedZone(_extractStopCoords());
   }
 
@@ -206,7 +201,7 @@ class _MapScreenState extends State<MapScreen> {
           "time": s['time'] ?? "--:--"
         }).toList();
         
-        // BUILD CONVEX HULL GEOFENCE
+        // Build Geofence
         _generateAuthorizedZone(stopPoints); 
       });
 
@@ -362,8 +357,7 @@ class _MapScreenState extends State<MapScreen> {
             initialCameraPosition: const CameraPosition(target: LatLng(8.5576, 76.8604), zoom: 14),
             markers: _markers,
             polylines: _polylines,
-            // 🔹 Show Polygon ONLY for Admin
-            polygons: widget.isAdmin ? _polygons : {}, 
+            polygons: _polygons, // 🔹 Visible to everyone now
             myLocationEnabled: true,
             onMapCreated: (c) => _controller.complete(c),
           )),
