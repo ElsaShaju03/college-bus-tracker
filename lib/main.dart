@@ -11,7 +11,10 @@ import 'screens/mapscreen.dart';
 import 'screens/busschedule.dart';
 import 'screens/notifications.dart';
 import 'screens/profile.dart';
-import 'screens/settings.dart'; // 🔹 Import Settings
+import 'screens/settings.dart';
+import 'screens/manage_users.dart';        // 🔹 Added
+import 'screens/admin_notification.dart';  // 🔹 Added
+import 'screens/driver_dashboard.dart';    // 🔹 Added
 
 // 🔹 Global Theme Notifier to control Day/Night mode
 final ValueNotifier<ThemeMode> themeNotifier = ValueNotifier(ThemeMode.light);
@@ -38,33 +41,35 @@ class CollegeBusTrackerApp extends StatelessWidget {
 
           // ----------- LIGHT THEME -----------
           theme: ThemeData(
+            useMaterial3: true, // 🔹 Enables modern UI for Alerts
             brightness: Brightness.light,
             primaryColor: const Color(0xFFFFD31A), // Yellow
-            scaffoldBackgroundColor: const Color(0xFFFFD31A), // Yellow top for Scaffold
-            cardColor: Colors.white, // White bottom sheet color
-            canvasColor: Colors.black, // Icon colors
+            scaffoldBackgroundColor: const Color(0xFFFFD31A), 
+            cardColor: Colors.white,
             
             appBarTheme: const AppBarTheme(
               backgroundColor: Color(0xFFFFD31A),
               foregroundColor: Colors.black,
+              elevation: 0,
             ),
           ),
 
           // ----------- DARK THEME -----------
           darkTheme: ThemeData(
+            useMaterial3: true,
             brightness: Brightness.dark,
-            primaryColor: const Color(0xFFFFD31A), // Yellow stays same
-            scaffoldBackgroundColor: const Color(0xFF121212), // Dark top
-            cardColor: const Color(0xFF1E1E1E), // Dark Grey bottom sheet color
-            canvasColor: Colors.white, // Icon colors
+            primaryColor: const Color(0xFFFFD31A),
+            scaffoldBackgroundColor: const Color(0xFF121212), 
+            cardColor: const Color(0xFF1E1E1E),
             
             appBarTheme: const AppBarTheme(
               backgroundColor: Color(0xFF121212),
               foregroundColor: Colors.white,
+              elevation: 0,
             ),
           ),
 
-          themeMode: currentMode, // Applies the current mode
+          themeMode: currentMode, 
 
           // ----------- ROUTES -----------
           initialRoute: '/splash',
@@ -72,12 +77,21 @@ class CollegeBusTrackerApp extends StatelessWidget {
             '/splash': (context) => const SplashScreen(),
             '/login': (context) => const LoginScreen(),
             '/register': (context) => const RegisterScreen(),
-            '/home': (context) => HomeScreen(),
-            '/mapscreen': (context) => const MapScreen(),
-            '/busschedule': (context) => const BusScheduleScreen(),
-            '/notifications': (context) => const NotificationsScreen(),
+            '/home': (context) => const HomeScreen(),
+            '/settings': (context) => const SettingsScreen(),
             '/profile': (context) => const ProfileScreen(),
-            '/settings': (context) => const SettingsScreen(), // 🔹 Add Route
+            '/notifications': (context) => const NotificationsScreen(),
+            
+            // 🔹 Management & Driver Routes
+            '/manage_users': (context) => const ManageUsersScreen(),
+            '/admin_notifications': (context) => const AdminNotificationScreen(),
+            
+            // Note: MapScreen and DriverDashboard are often called via 
+            // MaterialPageRoute to pass specific data (busId, isAdmin, etc.)
+            // but these routes are registered here for general navigation.
+            '/busschedule': (context) => const BusScheduleScreen(),
+            '/mapscreen': (context) => const MapScreen(),
+            '/driver_dashboard': (context) => const DriverDashboard(busId: ""), 
           },
         );
       },
