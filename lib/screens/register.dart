@@ -10,198 +10,169 @@ class RegisterScreen extends StatefulWidget {
 }
 
 class _RegisterScreenState extends State<RegisterScreen> {
-  // 🔹 Added Name Controller
+  // Controllers
+  final TextEditingController phoneController = TextEditingController();
+  final TextEditingController otpController = TextEditingController();
   final TextEditingController nameController = TextEditingController();
   final TextEditingController emailController = TextEditingController();
   final TextEditingController passwordController = TextEditingController();
-  final TextEditingController confirmPasswordController = TextEditingController();
 
-  bool _obscurePassword = true;
-  bool _obscureConfirmPassword = true;
+  // State Variables
+  int _currentStep = 1; // 1: Phone, 2: OTP, 3: Details
+  String _verificationId = "";
   bool _isLoading = false;
+  bool _obscurePassword = true;
 
-  // 🔹 Define Colors (Matching Home Page)
   static const Color yellow = Color(0xFFFFD31A);
-  static const Color darkBg = Color(0xFF121212);
-  static const Color inputFill = Color(0xFF1E1E1E);
 
-  Future<void> _register() async {
-    // Basic Validation
-    if (nameController.text.trim().isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text("Please enter your name")),
-      );
+  // ---------------------------------------------------
+  // 🔹 STEP 1: SEND OTP
+  // ---------------------------------------------------
+  Future<void> _sendOTP() async {
+    if (phoneController.text.trim().isEmpty) {
+      _showError("Please enter a phone number", isInfo: true);
       return;
     }
+    setState(() => _isLoading = true);
 
-    if (passwordController.text.trim() != confirmPasswordController.text.trim()) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text("Passwords do not match")),
-      );
-      return;
-    }
+    await FirebaseAuth.instance.verifyPhoneNumber(
+      phoneNumber: phoneController.text.trim(),
+      verificationCompleted: (PhoneAuthCredential credential) async {
+        // Optional: Auto-verify on some Androids
+      },
+      verificationFailed: (FirebaseAuthException e) {
+        setState(() => _isLoading = false);
+        _showError(e.message ?? "Verification Failed");
+      },
+      codeSent: (String verId, int? resendToken) {
+        setState(() {
+          _verificationId = verId;
+          _currentStep = 2;
+          _isLoading = false;
+        });
+      },
+      codeAutoRetrievalTimeout: (String verId) {},
+    );
+  }
+
+  // ---------------------------------------------------
+  // 🔹 STEP 2: VERIFY OTP
+  // ---------------------------------------------------
+  Future<void> _verifyOTP() async {
+    if (otpController.text.trim().isEmpty) return;
+    setState(() => _isLoading = true);
 
     try {
-      setState(() => _isLoading = true);
+      PhoneAuthCredential credential = PhoneAuthProvider.credential(
+        verificationId: _verificationId,
+        smsCode: otpController.text.trim(),
+      );
 
-      // 1️⃣ Create user in Firebase Auth
+      // Verify the code by signing in temporarily
+      await FirebaseAuth.instance.signInWithCredential(credential);
+      
+      // If success, move to details step
+      setState(() {
+        _currentStep = 3;
+        _isLoading = false;
+      });
+    } catch (e) {
+      setState(() => _isLoading = false);
+      _showError("Invalid OTP code. Please try again.");
+    }
+  }
+
+  // ---------------------------------------------------
+  // 🔹 STEP 3: FINAL REGISTRATION (Email/Password)
+  // ---------------------------------------------------
+  Future<void> _finalizeRegistration() async {
+    if (emailController.text.isEmpty || passwordController.text.isEmpty || nameController.text.isEmpty) {
+      _showError("Please fill in all fields", isInfo: true);
+      return;
+    }
+    setState(() => _isLoading = true);
+
+    try {
+      // 1. Create Email/Password Account
       UserCredential userCredential = await FirebaseAuth.instance.createUserWithEmailAndPassword(
         email: emailController.text.trim(),
         password: passwordController.text.trim(),
       );
 
-      // 2️⃣ Save user data in Firestore (users collection)
-      String uid = userCredential.user!.uid;
-      
-      await FirebaseFirestore.instance.collection('users').doc(uid).set({
-        'name': nameController.text.trim(), // 🔹 Saving Name
+      // 2. Save data to Firestore (users collection)
+      // 🔒 Note: Role is strictly set to 'student' here for security.
+      await FirebaseFirestore.instance.collection('users').doc(userCredential.user!.uid).set({
+        'name': nameController.text.trim(),
         'email': emailController.text.trim(),
-        'phone': '', // Placeholder
-        'assignedBus': '', // Placeholder
+        'phone': phoneController.text.trim(), 
+        'role': 'student', // 🔒 Default role
+        'assignedBus': '', // 🚌 Initialized empty for future driver mapping
         'createdAt': FieldValue.serverTimestamp(),
       });
 
-      // 3️⃣ Update Auth Profile (Optional but good for fast access)
-      await userCredential.user!.updateDisplayName(nameController.text.trim());
-
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text("Registration successful! Logging in...")),
-        );
-        // Navigate to Home directly after registration, or Login
-        Navigator.pushReplacementNamed(context, '/home'); 
+        Navigator.pushReplacementNamed(context, '/home');
       }
-    } on FirebaseAuthException catch (e) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text(e.message ?? "Registration failed")),
-        );
-      }
-    } finally {
-      if (mounted) setState(() => _isLoading = false);
+    } catch (e) {
+      setState(() => _isLoading = false);
+      _showError(e.toString());
     }
+  }
+
+  void _showError(String msg, {bool isInfo = false}) {
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(msg), 
+        backgroundColor: isInfo ? Colors.black87 : Colors.red
+      )
+    );
   }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      backgroundColor: darkBg, // 🔹 Dark Background
+      backgroundColor: const Color(0xFF121212),
       body: Center(
         child: SingleChildScrollView(
-          padding: const EdgeInsets.symmetric(horizontal: 24.0),
+          padding: const EdgeInsets.all(24),
           child: Column(
-            mainAxisAlignment: MainAxisAlignment.center,
             children: [
-              // 🔹 Header
-              const Text(
-                "CREATE ACCOUNT",
-                style: TextStyle(
-                  color: yellow,
-                  fontSize: 16,
-                  letterSpacing: 2,
-                  fontWeight: FontWeight.w600,
-                ),
-              ),
+              const Text("REGISTER", style: TextStyle(color: yellow, fontSize: 16, letterSpacing: 2, fontWeight: FontWeight.bold)),
               const SizedBox(height: 10),
-              const Text(
-                "Register",
-                style: TextStyle(
-                  color: Colors.white,
-                  fontSize: 32,
-                  fontWeight: FontWeight.bold,
-                ),
+              Text(
+                _currentStep == 1 ? "Verify Phone" : (_currentStep == 2 ? "Enter OTP" : "Final Details"),
+                style: const TextStyle(color: Colors.white, fontSize: 28, fontWeight: FontWeight.bold),
               ),
               const SizedBox(height: 40),
 
-              // 🔹 Name Input (New)
-              _buildTextField(
-                controller: nameController,
-                hint: "Full Name",
-                icon: Icons.person_outline,
-              ),
-              const SizedBox(height: 20),
+              // --- STEP 1: PHONE INPUT ---
+              if (_currentStep == 1) ...[
+                _buildTextField(phoneController, "Phone (e.g. +91...)", Icons.phone, keyboardType: TextInputType.phone),
+                const SizedBox(height: 20),
+                _buildButton("SEND OTP", _sendOTP),
+              ],
 
-              // 🔹 Email Input
-              _buildTextField(
-                controller: emailController,
-                hint: "Email",
-                icon: Icons.email_outlined,
-              ),
-              const SizedBox(height: 20),
+              // --- STEP 2: OTP INPUT ---
+              if (_currentStep == 2) ...[
+                _buildTextField(otpController, "6-Digit OTP", Icons.lock_clock, keyboardType: TextInputType.number),
+                const SizedBox(height: 20),
+                _buildButton("VERIFY CODE", _verifyOTP),
+                TextButton(
+                  onPressed: () => setState(() => _currentStep = 1), 
+                  child: const Text("Change Phone Number", style: TextStyle(color: yellow))
+                )
+              ],
 
-              // 🔹 Password Input
-              _buildTextField(
-                controller: passwordController,
-                hint: "Password",
-                icon: Icons.lock_outline,
-                obscureText: _obscurePassword,
-                onToggleVisibility: () {
-                  setState(() => _obscurePassword = !_obscurePassword);
-                },
-              ),
-              const SizedBox(height: 20),
-
-              // 🔹 Confirm Password Input
-              _buildTextField(
-                controller: confirmPasswordController,
-                hint: "Confirm Password",
-                icon: Icons.lock_outline,
-                obscureText: _obscureConfirmPassword,
-                onToggleVisibility: () {
-                  setState(() => _obscureConfirmPassword = !_obscureConfirmPassword);
-                },
-              ),
-              const SizedBox(height: 30),
-
-              // 🔹 Register Button
-              SizedBox(
-                width: double.infinity,
-                child: ElevatedButton(
-                  onPressed: _isLoading ? null : _register,
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: yellow,
-                    foregroundColor: Colors.black,
-                    padding: const EdgeInsets.symmetric(vertical: 16),
-                    shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(30),
-                    ),
-                  ),
-                  child: _isLoading
-                      ? const SizedBox(
-                          height: 20,
-                          width: 20,
-                          child: CircularProgressIndicator(color: Colors.black, strokeWidth: 2),
-                        )
-                      : const Text(
-                          "REGISTER",
-                          style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
-                        ),
-                ),
-              ),
-              
-              const SizedBox(height: 30),
-
-              // 🔹 Login Redirect
-              GestureDetector(
-                onTap: () {
-                  Navigator.pushReplacementNamed(context, '/login');
-                },
-                child: RichText(
-                  text: const TextSpan(
-                    text: "Already have an account? ",
-                    style: TextStyle(color: Colors.white70, fontSize: 14),
-                    children: [
-                      TextSpan(
-                        text: "Login",
-                        style: TextStyle(
-                          color: yellow,
-                          fontWeight: FontWeight.bold,
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-              ),
+              // --- STEP 3: EMAIL/PASS DETAILS ---
+              if (_currentStep == 3) ...[
+                _buildTextField(nameController, "Full Name", Icons.person),
+                const SizedBox(height: 15),
+                _buildTextField(emailController, "Email Address", Icons.email, keyboardType: TextInputType.emailAddress),
+                const SizedBox(height: 15),
+                _buildTextField(passwordController, "Password", Icons.lock, isPassword: true),
+                const SizedBox(height: 30),
+                _buildButton("FINISH REGISTRATION", _finalizeRegistration),
+              ],
             ],
           ),
         ),
@@ -209,38 +180,47 @@ class _RegisterScreenState extends State<RegisterScreen> {
     );
   }
 
-  // 🔹 Helper Widget for TextFields
-  Widget _buildTextField({
-    required TextEditingController controller,
-    required String hint,
-    required IconData icon,
-    bool obscureText = false,
-    VoidCallback? onToggleVisibility,
-  }) {
+  Widget _buildTextField(
+    TextEditingController controller, 
+    String hint, 
+    IconData icon, 
+    {bool isPassword = false, TextInputType keyboardType = TextInputType.text}
+  ) {
     return TextField(
       controller: controller,
-      obscureText: obscureText,
+      obscureText: isPassword ? _obscurePassword : false,
+      keyboardType: keyboardType,
       style: const TextStyle(color: Colors.white),
       decoration: InputDecoration(
         hintText: hint,
-        hintStyle: const TextStyle(color: Colors.white54),
+        hintStyle: const TextStyle(color: Colors.white38),
         prefixIcon: Icon(icon, color: yellow),
         filled: true,
-        fillColor: const Color(0xFF1E1E1E), // Dark card fill
-        border: OutlineInputBorder(
-          borderRadius: BorderRadius.circular(30),
-          borderSide: BorderSide.none,
-        ),
-        suffixIcon: onToggleVisibility != null
-            ? IconButton(
-                icon: Icon(
-                  obscureText ? Icons.visibility_off : Icons.visibility,
-                  color: Colors.white54,
-                ),
-                onPressed: onToggleVisibility,
-              )
-            : null,
+        fillColor: const Color(0xFF1E1E1E),
+        border: OutlineInputBorder(borderRadius: BorderRadius.circular(30), borderSide: BorderSide.none),
+        suffixIcon: isPassword ? IconButton(
+          icon: Icon(_obscurePassword ? Icons.visibility_off : Icons.visibility, color: Colors.white38),
+          onPressed: () => setState(() => _obscurePassword = !_obscurePassword),
+        ) : null,
         contentPadding: const EdgeInsets.symmetric(horizontal: 20, vertical: 18),
+      ),
+    );
+  }
+
+  Widget _buildButton(String text, VoidCallback onPressed) {
+    return SizedBox(
+      width: double.infinity,
+      height: 55,
+      child: ElevatedButton(
+        onPressed: _isLoading ? null : onPressed,
+        style: ElevatedButton.styleFrom(
+          backgroundColor: yellow, 
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(30)),
+          elevation: 0,
+        ),
+        child: _isLoading 
+          ? const SizedBox(height: 20, width: 20, child: CircularProgressIndicator(color: Colors.black, strokeWidth: 2)) 
+          : Text(text, style: const TextStyle(color: Colors.black, fontWeight: FontWeight.bold, fontSize: 16)),
       ),
     );
   }

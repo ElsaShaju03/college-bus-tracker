@@ -26,59 +26,78 @@ class _EditRouteScreenState extends State<EditRouteScreen> {
   static const Color yellow = Color(0xFFFFD31A);
   static const Color darkBg = Color(0xFF1A1A1A);
 
-  // 🔹 1. SAVE CURRENT ROUTE AS DEFAULT (BACKUP)
+  // ---------------------------------------------------
+  // 🔹 1. BACKUP & RESTORE LOGIC
+  // ---------------------------------------------------
+
+  // Saves the CURRENT stops as the "Standard" version for future resets
   Future<void> _saveAsDefault() async {
     try {
-      DocumentSnapshot doc = await FirebaseFirestore.instance.collection('bus_schedules').doc(widget.busId).get();
+      DocumentSnapshot doc = await FirebaseFirestore.instance
+          .collection('bus_schedules')
+          .doc(widget.busId)
+          .get();
+      
       List stops = doc['stops'] ?? [];
 
       if (stops.isEmpty) {
-        _showMessage("No stops to save!");
+        _showMessage("Cannot save an empty route as default!");
         return;
       }
 
       await FirebaseFirestore.instance.collection('bus_schedules').doc(widget.busId).update({
-        'standardRoute': stops // Create a backup field
+        'standardRoute': stops // Create the master backup field
       });
 
-      _showMessage("Route saved as Default!");
+      _showMessage("Current route saved as the Standard Default!");
     } catch (e) {
       _showMessage("Error saving default: $e");
     }
   }
 
-  // 🔹 2. RESTORE DEFAULT ROUTE (RESET)
+  // Overwrites the active stops with the "Standard" backup
   Future<void> _restoreDefault() async {
     try {
-      DocumentSnapshot doc = await FirebaseFirestore.instance.collection('bus_schedules').doc(widget.busId).get();
+      DocumentSnapshot doc = await FirebaseFirestore.instance
+          .collection('bus_schedules')
+          .doc(widget.busId)
+          .get();
+      
       var data = doc.data() as Map<String, dynamic>;
 
-      if (!data.containsKey('standardRoute')) {
-        _showMessage("No default route saved yet!");
+      if (!data.containsKey('standardRoute') || data['standardRoute'] == null) {
+        _showMessage("No default route found to restore!");
         return;
       }
 
       List standardStops = data['standardRoute'];
 
-      // Overwrite the active 'stops' with the backup
+      // Update 'stops' with the backup data
       await FirebaseFirestore.instance.collection('bus_schedules').doc(widget.busId).update({
         'stops': standardStops
       });
 
-      _showMessage("Original Route Restored!");
+      _showMessage("Original route has been restored!");
     } catch (e) {
       _showMessage("Error restoring: $e");
     }
   }
 
   void _showMessage(String msg) {
-    if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg)));
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(msg), behavior: SnackBarBehavior.floating)
+      );
+    }
   }
 
-  // 🔹 ADD STOP
+  // ---------------------------------------------------
+  // 🔹 2. STOP MANAGEMENT (ADD/DELETE)
+  // ---------------------------------------------------
+
   Future<void> _addStopToFirebase() async {
     if (_nameController.text.isEmpty || _latController.text.isEmpty || _lngController.text.isEmpty) {
-      _showMessage("Please enter a Name and Location");
+      _showMessage("Please provide a name and coordinates");
       return;
     }
 
@@ -87,9 +106,13 @@ class _EditRouteScreenState extends State<EditRouteScreen> {
         "stopName": _nameController.text.trim(),
         "lat": double.parse(_latController.text.trim()),
         "lng": double.parse(_lngController.text.trim()),
+        "time": "--:--" // Placeholder for schedule display
       };
 
-      await FirebaseFirestore.instance.collection('bus_schedules').doc(widget.busId).update({
+      await FirebaseFirestore.instance
+          .collection('bus_schedules')
+          .doc(widget.busId)
+          .update({
         "stops": FieldValue.arrayUnion([newStop])
       });
 
@@ -97,7 +120,7 @@ class _EditRouteScreenState extends State<EditRouteScreen> {
       _latController.clear();
       _lngController.clear();
       if (mounted) Navigator.pop(context);
-      _showMessage("Stop added successfully!");
+      _showMessage("Stop added to active route!");
     } catch (e) {
       _showMessage("Error: $e");
     }
@@ -109,8 +132,15 @@ class _EditRouteScreenState extends State<EditRouteScreen> {
     });
   }
 
+  // ---------------------------------------------------
+  // 🔹 3. LOCATION PICKERS
+  // ---------------------------------------------------
+
   Future<void> _pickFromMap() async {
-    final LatLng? result = await Navigator.push(context, MaterialPageRoute(builder: (context) => const LocationPickerScreen()));
+    final LatLng? result = await Navigator.push(
+      context, 
+      MaterialPageRoute(builder: (context) => const LocationPickerScreen())
+    );
     if (result != null) {
       setState(() {
         _latController.text = result.latitude.toStringAsFixed(6);
@@ -127,7 +157,7 @@ class _EditRouteScreenState extends State<EditRouteScreen> {
       _latController.text = position.latitude.toStringAsFixed(6);
       _lngController.text = position.longitude.toStringAsFixed(6);
     });
-    _showMessage("Location fetched!");
+    _showMessage("GPS Location captured!");
   }
 
   void _showAddStopModal() {
@@ -135,34 +165,57 @@ class _EditRouteScreenState extends State<EditRouteScreen> {
       context: context,
       isScrollControlled: true,
       backgroundColor: Colors.white,
-      shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(20))),
+      shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(25))),
       builder: (context) {
         return Padding(
-          padding: EdgeInsets.only(bottom: MediaQuery.of(context).viewInsets.bottom + 20, left: 20, right: 20, top: 20),
+          padding: EdgeInsets.only(
+            bottom: MediaQuery.of(context).viewInsets.bottom + 20, 
+            left: 20, right: 20, top: 25
+          ),
           child: Column(
             mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              const Text("Add New Stop", style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
-              const SizedBox(height: 15),
-              TextField(controller: _nameController, decoration: const InputDecoration(labelText: "Stop Name", border: OutlineInputBorder(), prefixIcon: Icon(Icons.place))),
-              const SizedBox(height: 15),
-              Row(
-                children: [
-                  Expanded(child: OutlinedButton.icon(onPressed: _pickFromMap, icon: const Icon(Icons.map, color: Colors.blue), label: const Text("Map", style: TextStyle(color: Colors.blue)))),
-                  const SizedBox(width: 10),
-                  Expanded(child: OutlinedButton.icon(onPressed: _useCurrentLocation, icon: const Icon(Icons.my_location, color: Colors.green), label: const Text("GPS", style: TextStyle(color: Colors.green)))),
-                ],
-              ),
-              const SizedBox(height: 10),
-              Row(
-                children: [
-                  Expanded(child: TextField(controller: _latController, readOnly: true, decoration: const InputDecoration(labelText: "Lat", border: OutlineInputBorder(), filled: true, fillColor: Colors.black12))),
-                  const SizedBox(width: 10),
-                  Expanded(child: TextField(controller: _lngController, readOnly: true, decoration: const InputDecoration(labelText: "Lng", border: OutlineInputBorder(), filled: true, fillColor: Colors.black12))),
-                ],
-              ),
+              const Text("Add New Bus Stop", style: TextStyle(fontSize: 22, fontWeight: FontWeight.bold)),
               const SizedBox(height: 20),
-              SizedBox(width: double.infinity, child: ElevatedButton(onPressed: _addStopToFirebase, style: ElevatedButton.styleFrom(backgroundColor: yellow, foregroundColor: Colors.black, padding: const EdgeInsets.symmetric(vertical: 15)), child: const Text("SAVE STOP", style: TextStyle(fontWeight: FontWeight.bold)))),
+              TextField(
+                controller: _nameController, 
+                decoration: const InputDecoration(
+                  labelText: "Stop Name (e.g. Campus Hub)", 
+                  border: OutlineInputBorder(), 
+                  prefixIcon: Icon(Icons.add_location)
+                )
+              ),
+              const SizedBox(height: 15),
+              Row(
+                children: [
+                  Expanded(child: OutlinedButton.icon(onPressed: _pickFromMap, icon: const Icon(Icons.map, color: Colors.blue), label: const Text("Map Picker"))),
+                  const SizedBox(width: 10),
+                  Expanded(child: OutlinedButton.icon(onPressed: _useCurrentLocation, icon: const Icon(Icons.my_location, color: Colors.green), label: const Text("Use GPS"))),
+                ],
+              ),
+              const SizedBox(height: 15),
+              Row(
+                children: [
+                  Expanded(child: TextField(controller: _latController, readOnly: true, decoration: const InputDecoration(labelText: "Latitude", filled: true, border: OutlineInputBorder()))),
+                  const SizedBox(width: 10),
+                  Expanded(child: TextField(controller: _lngController, readOnly: true, decoration: const InputDecoration(labelText: "Longitude", filled: true, border: OutlineInputBorder()))),
+                ],
+              ),
+              const SizedBox(height: 25),
+              SizedBox(
+                width: double.infinity, 
+                child: ElevatedButton(
+                  onPressed: _addStopToFirebase, 
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: yellow, 
+                    foregroundColor: Colors.black, 
+                    padding: const EdgeInsets.symmetric(vertical: 18),
+                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(15))
+                  ), 
+                  child: const Text("SAVE TO ROUTE", style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16))
+                )
+              ),
             ],
           ),
         );
@@ -170,27 +223,36 @@ class _EditRouteScreenState extends State<EditRouteScreen> {
     );
   }
 
+  // ---------------------------------------------------
+  // 🔹 4. BUILD UI
+  // ---------------------------------------------------
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      backgroundColor: Colors.white,
+      backgroundColor: const Color(0xFFF5F5F5),
       appBar: AppBar(
-        title: Text("Manage: ${widget.busNumber}"),
+        title: Text("Manage Bus ${widget.busNumber}"),
         backgroundColor: yellow,
         foregroundColor: Colors.black,
-        // 🔹 MENU FOR BACKUP / RESTORE
+        elevation: 0,
         actions: [
           PopupMenuButton<String>(
+            icon: const Icon(Icons.more_vert),
             onSelected: (value) {
               if (value == 'save') _saveAsDefault();
               if (value == 'restore') _restoreDefault();
             },
-            itemBuilder: (BuildContext context) {
-              return [
-                const PopupMenuItem(value: 'save', child: Row(children: [Icon(Icons.save, color: Colors.blue), SizedBox(width: 10), Text("Set as Default Route")])),
-                const PopupMenuItem(value: 'restore', child: Row(children: [Icon(Icons.restore, color: Colors.green), SizedBox(width: 10), Text("Restore Default Route")])),
-              ];
-            },
+            itemBuilder: (BuildContext context) => [
+              const PopupMenuItem(
+                value: 'save', 
+                child: Row(children: [Icon(Icons.backup, color: Colors.blue, size: 20), SizedBox(width: 10), Text("Backup as Default")])
+              ),
+              const PopupMenuItem(
+                value: 'restore', 
+                child: Row(children: [Icon(Icons.settings_backup_restore, color: Colors.green, size: 20), SizedBox(width: 10), Text("Restore Default")])
+              ),
+            ],
           ),
         ],
       ),
@@ -198,32 +260,39 @@ class _EditRouteScreenState extends State<EditRouteScreen> {
         onPressed: _showAddStopModal,
         backgroundColor: Colors.black,
         icon: const Icon(Icons.add_location_alt, color: yellow),
-        label: const Text("Add Stop", style: TextStyle(color: Colors.white)),
+        label: const Text("New Stop", style: TextStyle(color: Colors.white)),
       ),
       body: StreamBuilder<DocumentSnapshot>(
         stream: FirebaseFirestore.instance.collection('bus_schedules').doc(widget.busId).snapshots(),
         builder: (context, snapshot) {
-          if (snapshot.connectionState == ConnectionState.waiting) return const Center(child: CircularProgressIndicator());
-          if (!snapshot.hasData || !snapshot.data!.exists) return const Center(child: Text("Bus not found"));
+          if (snapshot.connectionState == ConnectionState.waiting) return const Center(child: CircularProgressIndicator(color: yellow));
+          if (!snapshot.hasData || !snapshot.data!.exists) return const Center(child: Text("Bus record not found"));
 
           var data = snapshot.data!.data() as Map<String, dynamic>;
           List stops = data['stops'] ?? [];
 
-          return stops.isEmpty 
-          ? const Center(child: Text("No stops added yet."))
-          : ListView.builder(
-            padding: const EdgeInsets.only(bottom: 80),
+          if (stops.isEmpty) {
+            return const Center(child: Text("No stops added to this route yet.", style: TextStyle(color: Colors.grey)));
+          }
+
+          return ListView.builder(
+            padding: const EdgeInsets.fromLTRB(10, 10, 10, 80),
             itemCount: stops.length,
             itemBuilder: (context, index) {
               var stop = stops[index];
               return Card(
-                margin: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+                elevation: 2,
+                margin: const EdgeInsets.symmetric(vertical: 6),
+                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(15)),
                 child: ListTile(
-                  leading: CircleAvatar(backgroundColor: darkBg, child: Text("${index + 1}", style: const TextStyle(color: Colors.white))),
+                  leading: CircleAvatar(
+                    backgroundColor: darkBg, 
+                    child: Text("${index + 1}", style: const TextStyle(color: yellow, fontWeight: FontWeight.bold))
+                  ),
                   title: Text(stop['stopName'], style: const TextStyle(fontWeight: FontWeight.bold)),
-                  subtitle: Text("Lat: ${stop['lat']}, Lng: ${stop['lng']}"),
+                  subtitle: Text("Lat: ${stop['lat'].toStringAsFixed(4)}, Lng: ${stop['lng'].toStringAsFixed(4)}"),
                   trailing: IconButton(
-                    icon: const Icon(Icons.delete, color: Colors.redAccent),
+                    icon: const Icon(Icons.remove_circle_outline, color: Colors.redAccent),
                     onPressed: () => _deleteStop(stop),
                   ),
                 ),

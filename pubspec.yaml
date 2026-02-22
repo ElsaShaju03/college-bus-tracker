@@ -11,30 +11,29 @@ dependencies:
   flutter:
     sdk: flutter
 
-  # 🔹 GOOGLE MAPS
+  # 🗺️ MAPS & NAVIGATION
   google_maps_flutter: ^2.10.0
   url_launcher: ^6.2.0
+  google_places_flutter: ^2.1.1
+  flutter_polyline_points: ^3.1.0
 
-  # 🔹 Notifications Package
-  flutter_local_notifications: ^18.0.1 
-
-  # 🔹 Date Formatting
-  intl: ^0.19.0
-
-  cupertino_icons: ^1.0.6
-
-  # Geolocator
-  geolocator: ^13.0.0
-
-  # WebSocket (Optional)
-  web_socket_channel: ^3.0.0
-
-  # Firebase packages
+  # 🔥 FIREBASE CORE
   firebase_core: ^4.1.1
   cloud_firestore: ^6.0.2
   firebase_auth: ^6.1.0
-  google_places_flutter: ^2.1.1
-  flutter_polyline_points: ^3.1.0
+
+  # 🔔 NOTIFICATIONS & SENSORY ALERTS
+  flutter_local_notifications: ^18.0.1 
+  # 🔹 NEW: For Siren Sound on Admin Alerts
+  audioplayers: ^6.1.0 
+  # 🔹 NEW: For phone vibration on SOS
+  vibration: ^2.1.0 
+
+  # 📍 LOCATION & UTILS
+  geolocator: ^13.0.0
+  intl: ^0.19.0
+  cupertino_icons: ^1.0.6
+  web_socket_channel: ^3.0.0
 
 dev_dependencies:
   flutter_test:
@@ -44,6 +43,11 @@ dev_dependencies:
 flutter:
   uses-material-design: true
 
+  # 📂 ASSETS CONFIGURATION
   assets:
     - assets/images/splash.png
     - assets/images/home.png
+    # 🔹 NEW: Added a sound folder for the Siren/Alarm
+    - assets/sounds/siren.mp3
+    # 🔹 (Optional) Add your custom bus icon here later
+    # - assets/images/bus_marker.png

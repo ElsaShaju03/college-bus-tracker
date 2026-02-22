@@ -5,47 +5,39 @@ import 'edit_route.dart';
 import 'addbus.dart'; 
 
 class BusScheduleScreen extends StatelessWidget {
-  // 🔹 1. Accept Admin Status
   final bool isAdmin;
+  final bool isDriver; // 🔹 Added isDriver flag
 
-  // 🔹 2. Update Constructor
-  const BusScheduleScreen({super.key, this.isAdmin = false});
+  const BusScheduleScreen({
+    super.key, 
+    this.isAdmin = false, 
+    this.isDriver = false, // 🔹 Default to false
+  });
 
-  // 🔹 Colors
+  // Colors
   static const Color yellow = Color(0xFFFFD31A);
   static const Color whiteBg = Colors.white;
   static const Color cardColorLight = Color(0xFF8E9991); 
   static const Color cardColorDark = Color(0xFF1A1A1A);
 
-  // 🔹 NEW: REASSIGN BUS DIALOG (Swap Hardware)
-  void _showReassignDialog(BuildContext context, String docId, String currentDevice, String busNumber) {
-    final TextEditingController newDeviceController = TextEditingController();
-    final TextEditingController reasonController = TextEditingController();
+  // 🔹 FEATURE: SWAP HARDWARE (Update Device ID)
+  void _showSwapDeviceDialog(BuildContext context, String docId, String currentDevice, String busNumber) {
+    final TextEditingController deviceController = TextEditingController(text: currentDevice);
 
     showDialog(
       context: context,
       builder: (ctx) => AlertDialog(
-        title: Text("Swap Bus for $busNumber"),
+        title: Text("Swap Device for $busNumber"),
         content: Column(
           mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Text("Current Device: $currentDevice", style: const TextStyle(fontWeight: FontWeight.bold, color: Colors.grey)),
+            const Text("Enter the new GPS Device ID to link with this bus:"),
             const SizedBox(height: 15),
             TextField(
-              controller: newDeviceController,
+              controller: deviceController,
               decoration: const InputDecoration(
-                labelText: "New Device ID",
-                hintText: "e.g. device_99",
-                border: OutlineInputBorder(),
-              ),
-            ),
-            const SizedBox(height: 10),
-            TextField(
-              controller: reasonController,
-              decoration: const InputDecoration(
-                labelText: "Reason",
-                hintText: "e.g. Breakdown / Flat Tire",
+                labelText: "Device ID",
+                hintText: "e.g. device_01",
                 border: OutlineInputBorder(),
               ),
             ),
@@ -56,62 +48,40 @@ class BusScheduleScreen extends StatelessWidget {
           ElevatedButton(
             style: ElevatedButton.styleFrom(backgroundColor: Colors.black, foregroundColor: Colors.white),
             onPressed: () async {
-              if (newDeviceController.text.isNotEmpty) {
-                try {
-                  // A. Save to History (Audit Log)
-                  await FirebaseFirestore.instance
-                      .collection('bus_schedules')
-                      .doc(docId)
-                      .collection('assignment_history') // Sub-collection
-                      .add({
-                    'previousDevice': currentDevice,
-                    'newDevice': newDeviceController.text.trim(),
-                    'reason': reasonController.text.trim(),
-                    'swappedAt': FieldValue.serverTimestamp(),
-                  });
-
-                  // B. Update the Live Route
-                  await FirebaseFirestore.instance
-                      .collection('bus_schedules')
-                      .doc(docId)
-                      .update({
-                    'deviceId': newDeviceController.text.trim()
-                  });
-
-                  if (ctx.mounted) {
-                    Navigator.pop(ctx);
-                    ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Bus Swapped Successfully!")));
-                  }
-                } catch (e) {
-                  ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text("Error: $e")));
+              if (deviceController.text.isNotEmpty) {
+                await FirebaseFirestore.instance
+                    .collection('bus_schedules')
+                    .doc(docId)
+                    .update({'deviceId': deviceController.text.trim()});
+                if (ctx.mounted) {
+                  Navigator.pop(ctx);
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    const SnackBar(content: Text("Hardware linked successfully!")),
+                  );
                 }
               }
             },
-            child: const Text("Confirm Swap"),
+            child: const Text("Save Link"),
           ),
         ],
       ),
     );
   }
 
-  // 🔹 FUNCTION: Delete Bus (Admin Only)
   void _deleteBus(BuildContext context, String docId) {
     showDialog(
       context: context,
       builder: (ctx) => AlertDialog(
         title: const Text("Delete Bus?"),
-        content: const Text("Are you sure you want to remove this bus and its route? This cannot be undone."),
+        content: const Text("Are you sure you want to remove this bus?"),
         actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(ctx), 
-            child: const Text("Cancel", style: TextStyle(color: Colors.black))
-          ),
+          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text("Cancel")),
           TextButton(
             onPressed: () async {
               await FirebaseFirestore.instance.collection('bus_schedules').doc(docId).delete();
               if (ctx.mounted) Navigator.pop(ctx);
             }, 
-            child: const Text("Delete", style: TextStyle(color: Colors.red, fontWeight: FontWeight.bold))
+            child: const Text("Delete", style: TextStyle(color: Colors.red))
           ),
         ],
       ),
@@ -127,11 +97,10 @@ class BusScheduleScreen extends StatelessWidget {
     final Color bottomSheetColor = isDarkMode ? const Color(0xFF121212) : whiteBg;
     final Color currentCardColor = isDarkMode ? cardColorDark : cardColorLight;
     final Color textColor = isDarkMode ? Colors.white : Colors.black;
-    final Color cardTextColor = isDarkMode ? Colors.white : Colors.black;
+    final Color cardTextColor = Colors.white; 
 
     return Scaffold(
       backgroundColor: topSectionColor,
-
       floatingActionButton: isAdmin 
         ? FloatingActionButton(
             backgroundColor: Colors.black,
@@ -147,7 +116,7 @@ class BusScheduleScreen extends StatelessWidget {
 
       body: Column(
         children: [
-          /// HEADER
+          // HEADER
           SizedBox(
             height: size.height * 0.15,
             child: SafeArea(
@@ -167,7 +136,7 @@ class BusScheduleScreen extends StatelessWidget {
             ),
           ),
 
-          /// LIST CONTAINER
+          // LIST CONTAINER
           Expanded(
             child: Container(
               width: double.infinity,
@@ -180,17 +149,13 @@ class BusScheduleScreen extends StatelessWidget {
                 child: StreamBuilder<QuerySnapshot>(
                   stream: FirebaseFirestore.instance.collection('bus_schedules').orderBy('createdAt', descending: true).snapshots(),
                   builder: (context, snapshot) {
-                    if (snapshot.connectionState == ConnectionState.waiting) {
-                      return Center(child: CircularProgressIndicator(color: textColor));
-                    }
-                    if (!snapshot.hasData || snapshot.data!.docs.isEmpty) {
-                      return Center(child: Text("No buses yet.", style: TextStyle(color: textColor)));
-                    }
+                    if (snapshot.connectionState == ConnectionState.waiting) return Center(child: CircularProgressIndicator(color: textColor));
+                    if (!snapshot.hasData || snapshot.data!.docs.isEmpty) return Center(child: Text("No buses yet.", style: TextStyle(color: textColor)));
 
                     final buses = snapshot.data!.docs;
 
                     return ListView.builder(
-                      padding: EdgeInsets.zero,
+                      padding: const EdgeInsets.only(bottom: 80),
                       itemCount: buses.length,
                       itemBuilder: (context, index) {
                         var doc = buses[index]; 
@@ -203,7 +168,9 @@ class BusScheduleScreen extends StatelessWidget {
                               MaterialPageRoute(
                                 builder: (context) => MapScreen(
                                   routeData: data,
-                                  busId: doc.id, 
+                                  busId: doc.id,
+                                  isAdmin: isAdmin, 
+                                  isDriver: isDriver, // 🔹 PASSING DRIVER STATUS
                                 ),
                               ),
                             );
@@ -214,9 +181,7 @@ class BusScheduleScreen extends StatelessWidget {
                             decoration: BoxDecoration(
                               color: currentCardColor,
                               borderRadius: BorderRadius.circular(20),
-                              boxShadow: [
-                                BoxShadow(color: Colors.black.withOpacity(0.1), blurRadius: 5, offset: const Offset(0,3))
-                              ]
+                              boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.1), blurRadius: 5, offset: const Offset(0,3))]
                             ),
                             child: Row(
                               children: [
@@ -230,57 +195,35 @@ class BusScheduleScreen extends StatelessWidget {
                                   child: Column(
                                     crossAxisAlignment: CrossAxisAlignment.start,
                                     children: [
-                                      Text(
-                                        data['busNumber'] ?? "Bus No.", 
-                                        style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: cardTextColor)
-                                      ),
-                                      Text(
-                                        data['routeTitle'] ?? "Route Name", 
-                                        style: TextStyle(fontSize: 14, color: cardTextColor.withOpacity(0.8))
-                                      ),
-                                      // Optional: Show current device being used
-                                      if (isAdmin && data['deviceId'] != null)
+                                      Text(data['busNumber'] ?? "Bus No.", style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: cardTextColor)),
+                                      Text(data['routeTitle'] ?? "Route Name", style: TextStyle(fontSize: 14, color: cardTextColor.withOpacity(0.8))),
+                                      if (isAdmin)
                                         Text(
-                                          "Device: ${data['deviceId']}",
-                                          style: const TextStyle(fontSize: 10, color: Colors.blueAccent),
+                                          "Device: ${data['deviceId'] ?? 'Not Linked'}",
+                                          style: const TextStyle(fontSize: 10, color: Colors.orangeAccent),
                                         ),
                                     ],
                                   ),
                                 ),
                                 
-                                // 🔹 ADMIN ACTIONS (Edit, Swap, Delete)
+                                // Admin Actions (Only Admins can Edit/Swap/Delete)
                                 if (isAdmin) ...[
-                                  // Edit Route
                                   IconButton(
-                                    icon: const Icon(Icons.edit, color: Colors.white),
-                                    onPressed: () {
-                                      Navigator.push(
-                                        context,
-                                        MaterialPageRoute(
-                                          builder: (context) => EditRouteScreen(
-                                            busId: doc.id, 
-                                            busNumber: data['busNumber'] ?? "Bus"
-                                          ),
-                                        ),
-                                      );
-                                    },
+                                    icon: const Icon(Icons.swap_horiz, color: Colors.orangeAccent),
+                                    tooltip: "Swap Hardware ID",
+                                    onPressed: () => _showSwapDeviceDialog(context, doc.id, data['deviceId'] ?? "", data['busNumber'] ?? "Bus"),
                                   ),
-                                  // 🔹 SWAP DEVICE BUTTON (Orange)
                                   IconButton(
-                                    icon: const Icon(Icons.swap_horiz, color: Colors.orange),
-                                    tooltip: "Swap Bus Device",
-                                    onPressed: () => _showReassignDialog(
-                                      context, 
-                                      doc.id, 
-                                      data['deviceId'] ?? "None", 
-                                      data['busNumber'] ?? "Bus"
-                                    ),
+                                    icon: const Icon(Icons.edit, color: Colors.white70),
+                                    onPressed: () => Navigator.push(context, MaterialPageRoute(builder: (context) => EditRouteScreen(busId: doc.id, busNumber: data['busNumber'] ?? "Bus"))),
                                   ),
-                                  // Delete Button
                                   IconButton(
                                     icon: const Icon(Icons.delete, color: Colors.redAccent),
                                     onPressed: () => _deleteBus(context, doc.id),
                                   ),
+                                ] else ...[
+                                  // Both Student and Driver see this arrow
+                                  const Icon(Icons.arrow_forward_ios, color: Colors.white24, size: 18),
                                 ]
                               ],
                             ),
