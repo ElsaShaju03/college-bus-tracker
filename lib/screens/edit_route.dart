@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:firebase_auth/firebase_auth.dart'; // 🔹 Added for permission check
 import 'package:geolocator/geolocator.dart'; 
 import 'package:google_maps_flutter/google_maps_flutter.dart';
 import 'location_picker.dart'; 
@@ -25,6 +26,35 @@ class _EditRouteScreenState extends State<EditRouteScreen> {
 
   static const Color yellow = Color(0xFFFFD31A);
   static const Color darkBg = Color(0xFF1A1A1A);
+
+  // 🔹 Permission Variables
+  String _userRole = 'student';
+  String _assignedBusId = '';
+  bool _isCheckingRole = true;
+
+  @override
+  void initState() {
+    super.initState();
+    _checkUserPermissions(); // 🔹 Check if Driver matches this Bus
+  }
+
+  // 🔹 Logic: Fetch user role and assigned bus to enforce permissions
+  Future<void> _checkUserPermissions() async {
+    final user = FirebaseAuth.instance.currentUser;
+    if (user != null) {
+      final userDoc = await FirebaseFirestore.instance.collection('users').doc(user.uid).get();
+      if (userDoc.exists) {
+        final data = userDoc.data() as Map<String, dynamic>;
+        if (mounted) {
+          setState(() {
+            _userRole = data['role'] ?? 'student';
+            _assignedBusId = data['assignedBus'] ?? '';
+            _isCheckingRole = false;
+          });
+        }
+      }
+    }
+  }
 
   // ---------------------------------------------------
   // 🔹 1. BACKUP & RESTORE LOGIC
@@ -106,7 +136,6 @@ class _EditRouteScreenState extends State<EditRouteScreen> {
         "stopName": _nameController.text.trim(),
         "lat": double.parse(_latController.text.trim()),
         "lng": double.parse(_lngController.text.trim()),
-        "time": "--:--" // Placeholder for schedule display
       };
 
       await FirebaseFirestore.instance
@@ -229,6 +258,14 @@ class _EditRouteScreenState extends State<EditRouteScreen> {
 
   @override
   Widget build(BuildContext context) {
+    // 🔹 Verification Logic: If Driver but trying to access wrong bus, show error
+    if (!_isCheckingRole && _userRole == 'driver' && _assignedBusId != widget.busId) {
+      return Scaffold(
+        appBar: AppBar(title: const Text("Access Denied"), backgroundColor: Colors.red),
+        body: const Center(child: Text("You are not authorized to edit this bus route.")),
+      );
+    }
+
     return Scaffold(
       backgroundColor: const Color(0xFFF5F5F5),
       appBar: AppBar(
@@ -237,6 +274,7 @@ class _EditRouteScreenState extends State<EditRouteScreen> {
         foregroundColor: Colors.black,
         elevation: 0,
         actions: [
+          // 🔹 Menu options are enabled for both Admin and authorized Driver
           PopupMenuButton<String>(
             icon: const Icon(Icons.more_vert),
             onSelected: (value) {
@@ -262,7 +300,9 @@ class _EditRouteScreenState extends State<EditRouteScreen> {
         icon: const Icon(Icons.add_location_alt, color: yellow),
         label: const Text("New Stop", style: TextStyle(color: Colors.white)),
       ),
-      body: StreamBuilder<DocumentSnapshot>(
+      body: _isCheckingRole 
+          ? const Center(child: CircularProgressIndicator(color: yellow))
+          : StreamBuilder<DocumentSnapshot>(
         stream: FirebaseFirestore.instance.collection('bus_schedules').doc(widget.busId).snapshots(),
         builder: (context, snapshot) {
           if (snapshot.connectionState == ConnectionState.waiting) return const Center(child: CircularProgressIndicator(color: yellow));

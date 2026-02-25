@@ -6,12 +6,14 @@ import 'addbus.dart';
 
 class BusScheduleScreen extends StatelessWidget {
   final bool isAdmin;
-  final bool isDriver; // 🔹 Added isDriver flag
+  final bool isDriver; 
+  final String? assignedBusId; // 🔹 Added to identify which bus belongs to the driver
 
   const BusScheduleScreen({
     super.key, 
     this.isAdmin = false, 
-    this.isDriver = false, // 🔹 Default to false
+    this.isDriver = false,
+    this.assignedBusId, // 🔹 Passed from home.dart
   });
 
   // Colors
@@ -160,6 +162,7 @@ class BusScheduleScreen extends StatelessWidget {
                       itemBuilder: (context, index) {
                         var doc = buses[index]; 
                         var data = doc.data() as Map<String, dynamic>;
+                        bool isBusLive = data['isTripActive'] ?? false; // 🔹 Check trip status
 
                         return GestureDetector(
                           onTap: () {
@@ -170,7 +173,7 @@ class BusScheduleScreen extends StatelessWidget {
                                   routeData: data,
                                   busId: doc.id,
                                   isAdmin: isAdmin, 
-                                  isDriver: isDriver, // 🔹 PASSING DRIVER STATUS
+                                  isDriver: isDriver, 
                                 ),
                               ),
                             );
@@ -195,7 +198,24 @@ class BusScheduleScreen extends StatelessWidget {
                                   child: Column(
                                     crossAxisAlignment: CrossAxisAlignment.start,
                                     children: [
-                                      Text(data['busNumber'] ?? "Bus No.", style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: cardTextColor)),
+                                      // 🔹 ROW ADDED FOR BUS NUMBER AND LIVE INDICATOR
+                                      Row(
+                                        children: [
+                                          Text(data['busNumber'] ?? "Bus No.", style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: cardTextColor)),
+                                          const SizedBox(width: 8),
+                                          Container(
+                                            padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                                            decoration: BoxDecoration(
+                                              color: isBusLive ? Colors.green : Colors.grey,
+                                              borderRadius: BorderRadius.circular(10),
+                                            ),
+                                            child: const Text(
+                                              "LIVE",
+                                              style: TextStyle(color: Colors.white, fontSize: 10, fontWeight: FontWeight.bold),
+                                            ),
+                                          ),
+                                        ],
+                                      ),
                                       Text(data['routeTitle'] ?? "Route Name", style: TextStyle(fontSize: 14, color: cardTextColor.withOpacity(0.8))),
                                       if (isAdmin)
                                         Text(
@@ -206,7 +226,7 @@ class BusScheduleScreen extends StatelessWidget {
                                   ),
                                 ),
                                 
-                                // Admin Actions (Only Admins can Edit/Swap/Delete)
+                                // 🔹 Updated Conditional Actions
                                 if (isAdmin) ...[
                                   IconButton(
                                     icon: const Icon(Icons.swap_horiz, color: Colors.orangeAccent),
@@ -221,8 +241,13 @@ class BusScheduleScreen extends StatelessWidget {
                                     icon: const Icon(Icons.delete, color: Colors.redAccent),
                                     onPressed: () => _deleteBus(context, doc.id),
                                   ),
+                                ] else if (isDriver && doc.id == assignedBusId) ...[
+                                  // 🔹 Driver sees Edit icon ONLY for their assigned bus
+                                  IconButton(
+                                    icon: const Icon(Icons.edit, color: Colors.white70),
+                                    onPressed: () => Navigator.push(context, MaterialPageRoute(builder: (context) => EditRouteScreen(busId: doc.id, busNumber: data['busNumber'] ?? "Bus"))),
+                                  ),
                                 ] else ...[
-                                  // Both Student and Driver see this arrow
                                   const Icon(Icons.arrow_forward_ios, color: Colors.white24, size: 18),
                                 ]
                               ],

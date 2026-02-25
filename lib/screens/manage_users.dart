@@ -22,16 +22,26 @@ class _ManageUsersScreenState extends State<ManageUsersScreen> {
       context: context,
       builder: (context) => StatefulBuilder(
         builder: (context, setDialogState) => AlertDialog(
-          title: Text("Manage ${userData['name']}"),
+          backgroundColor: const Color(0xFF1A1A1A), // Dark background for white text
+          title: Text("Manage ${userData['name']}", style: const TextStyle(color: Colors.white)),
           content: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
               // 1. Role Selection
               DropdownButtonFormField<String>(
                 value: selectedRole,
-                decoration: const InputDecoration(labelText: "User Role"),
+                dropdownColor: Colors.black, // Background of the list
+                style: const TextStyle(color: Colors.white), // White text for the box
+                decoration: const InputDecoration(
+                  labelText: "User Role",
+                  labelStyle: TextStyle(color: yellow),
+                  enabledBorder: UnderlineInputBorder(borderSide: BorderSide(color: Colors.white24)),
+                ),
                 items: ['student', 'driver', 'admin'].map((role) {
-                  return DropdownMenuItem(value: role, child: Text(role.toUpperCase()));
+                  return DropdownMenuItem(
+                    value: role, 
+                    child: Text(role.toUpperCase(), style: const TextStyle(color: Colors.white)) // White text for items
+                  );
                 }).toList(),
                 onChanged: (val) => setDialogState(() => selectedRole = val!),
               ),
@@ -45,14 +55,23 @@ class _ManageUsersScreenState extends State<ManageUsersScreen> {
                     if (!snapshot.hasData) return const CircularProgressIndicator();
                     var buses = snapshot.data!.docs;
                     return DropdownButtonFormField<String>(
-                      value: selectedBusId != "" ? selectedBusId : null,
-                      decoration: const InputDecoration(labelText: "Assign Bus"),
-                      hint: const Text("Select Bus"),
+                      value: (selectedBusId != null && selectedBusId != "") ? selectedBusId : null,
+                      dropdownColor: Colors.black,
+                      style: const TextStyle(color: Colors.white), // White text for the box
+                      decoration: const InputDecoration(
+                        labelText: "Assign Bus",
+                        labelStyle: TextStyle(color: yellow),
+                        enabledBorder: UnderlineInputBorder(borderSide: BorderSide(color: Colors.white24)),
+                      ),
+                      hint: const Text("Select Bus", style: TextStyle(color: Colors.white60)),
                       items: buses.map((bus) {
                         var bData = bus.data() as Map<String, dynamic>;
                         return DropdownMenuItem(
                           value: bus.id,
-                          child: Text("${bData['busNumber']} - ${bData['routeTitle']}"),
+                          child: Text(
+                            "${bData['busNumber']} - ${bData['routeTitle']}",
+                            style: const TextStyle(color: Colors.white), // White text for items
+                          ),
                         );
                       }).toList(),
                       onChanged: (val) => setDialogState(() => selectedBusId = val),
@@ -62,17 +81,28 @@ class _ManageUsersScreenState extends State<ManageUsersScreen> {
             ],
           ),
           actions: [
-            TextButton(onPressed: () => Navigator.pop(context), child: const Text("CANCEL")),
+            TextButton(
+              onPressed: () => Navigator.pop(context), 
+              child: const Text("CANCEL", style: TextStyle(color: Colors.white70))
+            ),
             ElevatedButton(
-              style: ElevatedButton.styleFrom(backgroundColor: Colors.black),
+              style: ElevatedButton.styleFrom(backgroundColor: yellow),
               onPressed: () async {
+                // 🔹 FORCE BUS SELECTION FOR DRIVERS
+                if (selectedRole == 'driver' && (selectedBusId == null || selectedBusId == "")) {
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    const SnackBar(content: Text("Error: You must assign a bus to the driver")),
+                  );
+                  return;
+                }
+
                 await FirebaseFirestore.instance.collection('users').doc(uid).update({
                   'role': selectedRole,
                   'assignedBus': selectedRole == 'driver' ? (selectedBusId ?? "") : "",
                 });
                 if (context.mounted) Navigator.pop(context);
               },
-              child: const Text("SAVE CHANGES", style: TextStyle(color: Colors.white)),
+              child: const Text("SAVE CHANGES", style: TextStyle(color: Colors.black, fontWeight: FontWeight.bold)),
             ),
           ],
         ),
@@ -173,20 +203,16 @@ class _ManageUsersScreenState extends State<ManageUsersScreen> {
                 trailing: Row(
                   mainAxisSize: MainAxisSize.min,
                   children: [
-                    // REJECT
                     IconButton(
                       icon: const Icon(Icons.close, color: Colors.red),
                       onPressed: () async {
                         await FirebaseFirestore.instance.collection('role_requests').doc(requests[index].id).delete();
                       },
                     ),
-                    // APPROVE
                     IconButton(
                       icon: const Icon(Icons.check_circle, color: Colors.green, size: 30),
                       onPressed: () {
-                        // We open the edit dialog to choose their role AND assign a bus immediately
                         _showEditUserDialog(context, reqData['uid'], reqData);
-                        // Clean up the request after clicking Save in the dialog
                         FirebaseFirestore.instance.collection('role_requests').doc(requests[index].id).delete();
                       },
                     ),

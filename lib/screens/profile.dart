@@ -22,8 +22,9 @@ class _ProfileScreenState extends State<ProfileScreen> {
   User? _currentUser;
   String _profileImageUrl = 'assets/images/profile.png';
   
-  // 🔹 New State Variables
+  // State Variables
   String _role = 'student';
+  String _displayBusName = "Not Assigned"; // To show "Bus 21" instead of ID
   bool _isRequestPending = false;
 
   @override
@@ -56,12 +57,26 @@ class _ProfileScreenState extends State<ProfileScreen> {
       if (userDoc.exists && userDoc.data() != null) {
         Map<String, dynamic> data = userDoc.data() as Map<String, dynamic>;
 
+        String busId = data['assignedBus'] ?? '';
+        String roleStr = data['role'] ?? 'student';
+
+        // 3. If User is a Driver and has a bus ID, fetch the actual Bus Number
+        if (roleStr == 'driver' && busId.isNotEmpty) {
+          DocumentSnapshot busDoc = await FirebaseFirestore.instance
+              .collection('bus_schedules')
+              .doc(busId)
+              .get();
+          if (busDoc.exists) {
+            _displayBusName = busDoc['busNumber'] ?? "Unknown Bus";
+          }
+        }
+
         if (!mounted) return;
         setState(() {
           _nameController.text = data['name'] ?? '';
           _phoneController.text = data['phone'] ?? '';
-          _busController.text = data['assignedBus'] ?? '';
-          _role = data['role'] ?? 'student';
+          _busController.text = busId;
+          _role = roleStr;
           _isRequestPending = requestQuery.docs.isNotEmpty;
           
           if (data.containsKey('profileImageUrl') && data['profileImageUrl'] != null) {
@@ -79,7 +94,6 @@ class _ProfileScreenState extends State<ProfileScreen> {
     }
   }
 
-  // 🔹 Function to submit a Driver Request
   Future<void> _requestDriverRole() async {
     setState(() => _isLoading = true);
     try {
@@ -122,7 +136,6 @@ class _ProfileScreenState extends State<ProfileScreen> {
           .set({
         'name': _nameController.text.trim(),
         'phone': _phoneController.text.trim(),
-        'assignedBus': _busController.text.trim(),
       }, SetOptions(merge: true));
 
       if (!mounted) return;
@@ -157,7 +170,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
           icon: const Icon(Icons.arrow_back_ios, color: Colors.black),
           onPressed: () => Navigator.pop(context),
         ),
-        title: const Text("Edit Profile", style: TextStyle(color: Colors.black, fontSize: 24, fontWeight: FontWeight.bold)),
+        title: const Text("User Profile", style: TextStyle(color: Colors.black, fontSize: 24, fontWeight: FontWeight.bold)),
         centerTitle: true,
       ),
       body: Column(
@@ -180,7 +193,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
                 const SizedBox(height: 10),
                 Text(_currentUser?.email ?? 'N/A', style: const TextStyle(color: Colors.black54, fontSize: 16, fontWeight: FontWeight.w500)),
                 
-                // 🔹 Role Badge
+                // Role Badge
                 Container(
                   margin: const EdgeInsets.only(top: 8),
                   padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
@@ -203,19 +216,49 @@ class _ProfileScreenState extends State<ProfileScreen> {
                   : SingleChildScrollView(
                       padding: const EdgeInsets.all(24.0),
                       child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
-                          _buildProfileTextField(controller: _nameController, labelText: "Name", icon: Icons.person_outline),
+                          // 🔹 NEW: ASSIGNMENT STATUS FEEDBACK (For Drivers)
+                          if (_role == 'driver') ...[
+                            Container(
+                              width: double.infinity,
+                              padding: const EdgeInsets.all(16),
+                              margin: const EdgeInsets.only(bottom: 20),
+                              decoration: BoxDecoration(
+                                color: Colors.black,
+                                borderRadius: BorderRadius.circular(20),
+                              ),
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  const Text("ASSIGNMENT STATUS", style: TextStyle(color: yellow, fontSize: 12, fontWeight: FontWeight.bold)),
+                                  const SizedBox(height: 5),
+                                  Text("Role: ${_role[0].toUpperCase()}${_role.substring(1)}", style: const TextStyle(color: Colors.white, fontSize: 16)),
+                                  Text("Assigned Bus: $_displayBusName", style: const TextStyle(color: Colors.white, fontSize: 16, fontWeight: FontWeight.bold)),
+                                ],
+                              ),
+                            ),
+                          ],
+
+                          const Text("REGISTRATION DETAILS", style: TextStyle(fontWeight: FontWeight.bold, fontSize: 14, color: Colors.black54)),
+                          const SizedBox(height: 15),
+
+                          _buildProfileTextField(controller: _nameController, labelText: "Full Name", icon: Icons.person_outline),
                           const SizedBox(height: 20),
                           _buildProfileTextField(controller: _phoneController, labelText: "Phone Number", icon: Icons.phone_android, keyboardType: TextInputType.phone),
                           const SizedBox(height: 20),
                           
-                          // Only show Assigned Bus for Drivers/Admins
-                          if (_role != 'student')
-                            _buildProfileTextField(controller: _busController, labelText: "Assigned Bus ID/Route", icon: Icons.directions_bus),
+                          // Bus ID Field (Read only for info)
+                          _buildProfileTextField(
+                            controller: _busController, 
+                            labelText: "Mapped Bus ID", 
+                            icon: Icons.qr_code,
+                            enabled: false // User cannot change their own mapping
+                          ),
                           
                           const SizedBox(height: 30),
 
-                          /// 🔹 REQUEST DRIVER ROLE BUTTON (Only for Students)
+                          // Request Driver Role Button
                           if (_role == 'student')
                             Padding(
                               padding: const EdgeInsets.only(bottom: 20),
@@ -226,7 +269,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
                                 style: OutlinedButton.styleFrom(
                                   foregroundColor: Colors.black,
                                   side: const BorderSide(color: Colors.black, width: 2),
-                                  minimumSize: const Size(double.infinity, 50),
+                                  minimumSize: const Size(double.infinity, 55),
                                   shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(30)),
                                 ),
                               ),
@@ -254,7 +297,13 @@ class _ProfileScreenState extends State<ProfileScreen> {
     );
   }
 
-  Widget _buildProfileTextField({required TextEditingController controller, required String labelText, required IconData icon, TextInputType keyboardType = TextInputType.text}) {
+  Widget _buildProfileTextField({
+    required TextEditingController controller, 
+    required String labelText, 
+    required IconData icon, 
+    TextInputType keyboardType = TextInputType.text,
+    bool enabled = true,
+  }) {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
@@ -263,11 +312,15 @@ class _ProfileScreenState extends State<ProfileScreen> {
           child: Text(labelText, style: const TextStyle(color: Colors.black87, fontWeight: FontWeight.bold, fontSize: 14)),
         ),
         Container(
-          decoration: BoxDecoration(color: darkCardBg, borderRadius: BorderRadius.circular(20), boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.1), blurRadius: 10, offset: const Offset(0, 5))]),
+          decoration: BoxDecoration(
+            color: enabled ? darkCardBg : Colors.grey.shade400, 
+            borderRadius: BorderRadius.circular(20),
+          ),
           child: TextField(
             controller: controller,
             keyboardType: keyboardType,
-            style: const TextStyle(color: Colors.white),
+            enabled: enabled,
+            style: TextStyle(color: enabled ? Colors.white : Colors.black54),
             decoration: InputDecoration(
               prefixIcon: Icon(icon, color: yellow),
               hintText: "Enter $labelText",

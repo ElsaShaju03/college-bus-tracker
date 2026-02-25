@@ -10,6 +10,7 @@ import 'admin_notification.dart';
 import 'manage_users.dart'; 
 import 'driver_dashboard.dart'; 
 import 'mapscreen.dart';
+import 'edit_route.dart'; // 🔹 Import added for navigation
 
 class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});
@@ -67,7 +68,7 @@ class _HomeScreenState extends State<HomeScreen> {
         if (userDoc.exists) {
           Map<String, dynamic> data = userDoc.data() as Map<String, dynamic>;
           String role = data['role'] ?? "student"; 
-          String busId = data['assignedBus'] ?? "";
+          String busId = data['assignedBus'] ?? ""; 
 
           if (mounted) {
             setState(() {
@@ -84,10 +85,6 @@ class _HomeScreenState extends State<HomeScreen> {
       debugPrint("Error fetching data: $e");
     }
   }
-
-  // ---------------------------------------------------
-  // 🔹 EMERGENCY ALERT (Admin Only)
-  // ---------------------------------------------------
 
   void _listenForEmergencies() {
     _emergencyAlertSubscription = FirebaseFirestore.instance
@@ -174,10 +171,6 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
-  // ---------------------------------------------------
-  // 🔹 UI BUILD
-  // ---------------------------------------------------
-
   @override
   Widget build(BuildContext context) {
     final Size size = MediaQuery.of(context).size;
@@ -244,24 +237,20 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
-  // 🔹 DYNAMIC MENU GENERATOR (UPDATED)
   List<Widget> _buildMenuCards(BuildContext context) {
     if (_userRole == 'admin') {
       return [
         _menuCard(icon: Icons.group, title: "Manage Users", onTap: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const ManageUsersScreen()))),
-        _menuCard(
-          icon: Icons.calendar_month, 
-          title: "Bus Schedule", 
-          onTap: () => Navigator.push(context, MaterialPageRoute(builder: (_) => BusScheduleScreen(isAdmin: true, isDriver: false)))
-        ),
+        _menuCard(icon: Icons.calendar_month, title: "Bus Schedule", onTap: () => Navigator.push(context, MaterialPageRoute(builder: (_) => BusScheduleScreen(isAdmin: true, isDriver: false)))),
         _menuCard(icon: Icons.campaign, title: "Send Alerts", onTap: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const AdminNotificationScreen()))),
-        _menuCard(
-          icon: Icons.map, 
-          title: "Live Tracking", 
-          onTap: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const MapScreen(isAdmin: true, isDriver: false)))
-        ),
+        _menuCard(icon: Icons.map, title: "Live Tracking", onTap: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const MapScreen(isAdmin: true, isDriver: false)))),
       ];
     } else if (_userRole == 'driver') {
+      if (_assignedBusId.isEmpty) {
+        return [
+          _menuCard(icon: Icons.hourglass_empty, title: "Waiting for Admin to assign a bus", onTap: () {}),
+        ];
+      }
       return [
         _menuCard(
           icon: Icons.dashboard_customize, 
@@ -271,23 +260,27 @@ class _HomeScreenState extends State<HomeScreen> {
         _menuCard(
           icon: Icons.route, 
           title: "My Route Map", 
-          // 🔹 Passes assigned bus directly to map
           onTap: () => Navigator.push(context, MaterialPageRoute(builder: (_) => MapScreen(busId: _assignedBusId, isAdmin: false, isDriver: true))) 
+        ),
+        // 🔹 NEW: MANAGE MY ROUTE CARD FOR DRIVERS
+        _menuCard(
+          icon: Icons.edit_location_alt, 
+          title: "Manage My Route", 
+          onTap: () => Navigator.push(
+            context, 
+            MaterialPageRoute(
+              builder: (_) => EditRouteScreen(
+                busId: _assignedBusId, 
+                busNumber: "Assigned Bus",
+              ),
+            ),
+          ),
         ),
       ];
     } else {
-      // Student Role
       return [
-        _menuCard(
-          icon: Icons.directions_bus, 
-          title: "Track My Bus", 
-          onTap: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const MapScreen(isAdmin: false, isDriver: false)))
-        ),
-        _menuCard(
-          icon: Icons.calendar_month, 
-          title: "Bus Schedule", 
-          onTap: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const BusScheduleScreen(isAdmin: false, isDriver: false)))
-        ),
+        _menuCard(icon: Icons.directions_bus, title: "Track My Bus", onTap: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const MapScreen(isAdmin: false, isDriver: false)))),
+        _menuCard(icon: Icons.calendar_month, title: "Bus Schedule", onTap: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const BusScheduleScreen(isAdmin: false, isDriver: false)))),
       ];
     }
   }

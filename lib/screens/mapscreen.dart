@@ -7,6 +7,7 @@ import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:flutter_polyline_points/flutter_polyline_points.dart';
+import 'package:vibration/vibration.dart'; // 🔹 Added vibration import
 
 class MapScreen extends StatefulWidget {
   final Map<String, dynamic>? routeData;
@@ -49,6 +50,7 @@ class _MapScreenState extends State<MapScreen> {
   bool _hasCentered = false;
   bool _isViolatingRoute = false;
   bool _isSOSLoading = false;
+  bool _isTripActive = false; // 🔹 Added to track trip status
 
   // Emergency Prevention Flags
   bool _speedAlertLogged = false;
@@ -62,14 +64,19 @@ class _MapScreenState extends State<MapScreen> {
   @override
   void initState() {
     super.initState();
+    // 🔹 Initialize trip status from routeData if available
+    if (widget.routeData != null) {
+      _isTripActive = widget.routeData!['isTripActive'] ?? false;
+    }
+
     if (widget.routeData == null && widget.busId != null) {
       _fetchRouteDataManually();
     } else {
       _loadRouteData();
+      _startListeningToBus();
     }
     _initNotifications();
     _initLocationTracking();
-    _startListeningToBus();
 
     if (widget.isAdmin || widget.isDriver) {
       _startListeningToAllBuses();
@@ -102,12 +109,17 @@ class _MapScreenState extends State<MapScreen> {
         }
       }
       setState(() {
+        _isTripActive = data['isTripActive'] ?? false; // 🔹 Update trip status
         _stops = (data['stops'] as List)
             .map((s) => {"name": s['stopName'], "time": s['time'] ?? "--:--"})
             .toList();
         _generateAuthorizedZone(stopPoints);
       });
       await _fetchRoadSnappedRoute(stopPoints);
+
+      if (data['deviceId'] != null && data['deviceId'] != "") {
+        _startListeningToBus(manualDeviceId: data['deviceId']);
+      }
     }
   }
 
@@ -140,7 +152,7 @@ class _MapScreenState extends State<MapScreen> {
     try {
       final user = FirebaseAuth.instance.currentUser;
       await FirebaseFirestore.instance.collection('emergency_alerts').add({
-        'busNumber': widget.routeData?['busNumber'] ?? 'Unknown',
+        'busNumber': widget.routeData?['busNumber'] ?? 'Assigned Bus',
         'busId': widget.busId,
         'type': type,
         'detail': detail ?? '',
@@ -189,7 +201,7 @@ class _MapScreenState extends State<MapScreen> {
   }
 
   // ---------------------------------------------------
-  // 🔹 GEOMETRY & GEOFENCING
+  // 🔹 GEOMETRY & GEOFENCING (UPDATED FOR IN-APP FEEDBACK)
   // ---------------------------------------------------
   bool _isPointInPolygon(LatLng point, List<LatLng> polygon) {
     int i, j = polygon.length - 1;
@@ -216,14 +228,34 @@ class _MapScreenState extends State<MapScreen> {
     bool isInside = _isPointInPolygon(busPos, _polygonVertices);
     if (!isInside && !_isViolatingRoute) {
       setState(() => _isViolatingRoute = true);
+      
+      // 🔹 High-priority local notification
       _showNotification("🚨 ROUTE VIOLATION", "Vehicle outside authorized area!");
+
+      if (widget.isDriver) {
+        Vibration.vibrate(duration: 1000); 
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text("🚨 WARNING: YOU ARE OUTSIDE THE AUTHORIZED ROUTE!"),
+            backgroundColor: Colors.red,
+            duration: Duration(seconds: 5),
+          ),
+        );
+      }
+
       if (!_geofenceAlertLogged) {
-        _triggerEmergency(type: 'RULE_BREAK', detail: 'Route Deviation');
+        _triggerEmergency(type: 'RULE_BREAK', detail: 'Route Deviation Detected');
         _geofenceAlertLogged = true;
       }
     } else if (isInside && _isViolatingRoute) {
       setState(() => _isViolatingRoute = false);
       _geofenceAlertLogged = false;
+
+      if (widget.isDriver) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text("✅ Back on Route"), backgroundColor: Colors.green),
+        );
+      }
     }
     _generateAuthorizedZone(_extractStopCoords());
   }
@@ -341,9 +373,12 @@ class _MapScreenState extends State<MapScreen> {
   // ---------------------------------------------------
   // 🔹 SYSTEM HELPERS
   // ---------------------------------------------------
-  void _startListeningToBus() {
-    String docId =
-        widget.routeData?['deviceId'] ?? (widget.busId ?? 'test_bus');
+  void _startListeningToBus({String? manualDeviceId}) {
+    String docId = manualDeviceId ??
+        (widget.routeData?['deviceId'] ?? (widget.busId ?? 'test_bus'));
+    
+    _busStreamSub?.cancel(); 
+    
     _busStreamSub = FirebaseFirestore.instance
         .collection('devices')
         .doc(docId)
@@ -378,11 +413,13 @@ class _MapScreenState extends State<MapScreen> {
   }
 
   List<LatLng> _extractStopCoords() {
-    if (widget.routeData?['stops'] == null) return [];
-    return (widget.routeData!['stops'] as List)
-        .map((s) => LatLng(double.parse(s['lat'].toString()),
-            double.parse(s['lng'].toString())))
-        .toList();
+    if (widget.routeData?['stops'] != null) {
+      return (widget.routeData!['stops'] as List)
+          .map((s) => LatLng(double.parse(s['lat'].toString()),
+              double.parse(s['lng'].toString())))
+          .toList();
+    }
+    return [];
   }
 
   void _loadRouteData() async {
@@ -425,46 +462,56 @@ class _MapScreenState extends State<MapScreen> {
   }
 
   // ---------------------------------------------------
-  // 🔹 NAVIGATE TO BUS (EXTERNAL MAP) - UPDATED
+  // 🔹 NAVIGATE TO BUS (OPTION B: OFFICIAL ROUTE IN EXTERNAL MAP)
   // ---------------------------------------------------
   Future<void> _launchLiveNavigation() async {
-    if (_busLocation == null) {
+    // 1. Extract coordinates of the official stops
+    List<LatLng> stops = _extractStopCoords();
+
+    if (stops.isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text("Waiting for bus signal...")));
+          const SnackBar(content: Text("No official route stops found.")));
       return;
     }
 
-    // 1. Origin: User's physical location
-    final String origin = _deviceLatLng != null
-        ? "${_deviceLatLng!.latitude},${_deviceLatLng!.longitude}"
-        : "current+location";
+    // 2. Set Origin: The very first stop of the bus route
+    final String origin = "${stops.first.latitude},${stops.first.longitude}";
 
-    // 2. Destination: Live ESP32 location
-    final String destination =
-        "${_busLocation!.latitude},${_busLocation!.longitude}";
+    // 3. Set Destination: The very last stop of the bus route
+    final String destination = "${stops.last.latitude},${stops.last.longitude}";
 
-    // 3. Waypoints: Add official stops as waypoints to force the route
-    List<LatLng> stops = _extractStopCoords();
+    // 4. Set Waypoints: Pass intermediate stops to force the specific route
     String waypoints = "";
-    if (stops.isNotEmpty) {
-      // Limit waypoints to avoid URL length issues
-      var pathStops = stops.length > 10 ? stops.take(10) : stops;
+    if (stops.length > 2) {
+      List<LatLng> intermediateStops = stops.sublist(1, stops.length - 1);
+
+      // Google Maps mobile URLs support a limited number of waypoints (~12-15)
+      if (intermediateStops.length > 12) {
+        intermediateStops = intermediateStops.take(12).toList();
+      }
+
       waypoints = "&waypoints=" +
-          pathStops.map((p) => "${p.latitude},${p.longitude}").join('|');
+          intermediateStops.map((p) => "${p.latitude},${p.longitude}").join('|');
     }
 
+    // 5. Construct URL (Travel mode: driving)
     final Uri url = Uri.parse(
         "https://www.google.com/maps/dir/?api=1&origin=$origin&destination=$destination$waypoints&travelmode=driving");
 
+    // 6. Launch external application
     if (await canLaunchUrl(url)) {
       await launchUrl(url, mode: LaunchMode.externalApplication);
     } else {
-      ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text("Could not launch Google Maps")));
+      await launchUrl(url, mode: LaunchMode.externalApplication);
     }
   }
 
   Future<void> _initNotifications() async {
+    await _notificationsPlugin
+        .resolvePlatformSpecificImplementation<
+            AndroidFlutterLocalNotificationsPlugin>()
+        ?.requestNotificationsPermission();
+
     await _notificationsPlugin.initialize(const InitializationSettings(
         android: AndroidInitializationSettings('@mipmap/ic_launcher')));
   }
@@ -500,11 +547,24 @@ class _MapScreenState extends State<MapScreen> {
     }
   }
 
+  List<LatLng> get _minimalPolygonVertices {
+    List<LatLng> left = [], right = [];
+    List<LatLng> stopPoints = _extractStopCoords();
+    if (stopPoints.isEmpty) return [];
+    double buffer = 0.004;
+    for (var stop in stopPoints) {
+      left.add(LatLng(stop.latitude + buffer, stop.longitude - buffer));
+      right.insert(0, LatLng(stop.latitude - buffer, stop.longitude + buffer));
+    }
+    return [...left, ...right];
+  }
+
   @override
   Widget build(BuildContext context) {
     final bool isDark = Theme.of(context).brightness == Brightness.dark;
     return Scaffold(
-      appBar: AppBar(title: Text(widget.routeData?['busNumber'] ?? 'Bus Tracker')),
+      appBar:
+          AppBar(title: Text(widget.routeData?['busNumber'] ?? 'Bus Tracker')),
       floatingActionButton: Column(
         mainAxisAlignment: MainAxisAlignment.end,
         children: [
@@ -522,7 +582,8 @@ class _MapScreenState extends State<MapScreen> {
               onPressed: _launchLiveNavigation,
               icon: const Icon(Icons.navigation),
               label: const Text("Navigate"),
-              backgroundColor: _isViolatingRoute ? Colors.red : Colors.blueAccent),
+              backgroundColor:
+                  _isViolatingRoute ? Colors.red : Colors.blueAccent),
         ],
       ),
       body: Column(
@@ -551,13 +612,41 @@ class _MapScreenState extends State<MapScreen> {
               flex: 3,
               child: Container(
                   color: isDark ? const Color(0xFF121212) : Colors.white,
-                  child: ListView.builder(
-                      itemCount: _stops.length,
-                      itemBuilder: (context, i) => ListTile(
-                          leading: Text(_stops[i]['time'] ?? "--:--",
-                              style:
-                                  const TextStyle(fontWeight: FontWeight.bold)),
-                          title: Text(_stops[i]['name'] ?? "Stop"))))),
+                  child: Column(
+                    children: [
+                      Container(
+                        width: double.infinity,
+                        padding: const EdgeInsets.symmetric(vertical: 8),
+                        color: _isTripActive
+                            ? Colors.green.withOpacity(0.1)
+                            : Colors.orange.withOpacity(0.1),
+                        child: Center(
+                          child: Text(
+                            _isTripActive
+                                ? "Status: On Route"
+                                : "Status: Trip Not Started / In Depot",
+                            style: TextStyle(
+                              color: _isTripActive
+                                  ? Colors.green
+                                  : Colors.orange.shade900,
+                              fontWeight: FontWeight.bold,
+                              fontSize: 14,
+                            ),
+                          ),
+                        ),
+                      ),
+                      const Divider(height: 1),
+                      Expanded(
+                        child: ListView.builder(
+                            itemCount: _stops.length,
+                            itemBuilder: (context, i) => ListTile(
+                                leading: Text(_stops[i]['time'] ?? "--:--",
+                                    style: const TextStyle(
+                                        fontWeight: FontWeight.bold)),
+                                title: Text(_stops[i]['name'] ?? "Stop"))),
+                      ),
+                    ],
+                  ))),
         ],
       ),
     );
