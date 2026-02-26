@@ -47,6 +47,7 @@ flutter:
   assets:
     - assets/images/splash.png
     - assets/images/home.png
+    - assets/images/login.png
     # 🔹 NEW: Added a sound folder for the Siren/Alarm
     - assets/sounds/siren.mp3
     # 🔹 (Optional) Add your custom bus icon here later

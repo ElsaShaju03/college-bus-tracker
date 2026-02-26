@@ -85,8 +85,13 @@ class _LoginScreenState extends State<LoginScreen> {
             child: Column(
               mainAxisAlignment: MainAxisAlignment.center,
               children: [
-                /// 🔹 APP LOGO / TITLE
-                const Icon(Icons.directions_bus_filled, size: 80, color: Colors.black),
+                /// 🔹 APP LOGO / TITLE (Image replaced here)
+                Image.asset(
+                  'assets/images/login.png',
+                  height: 200,
+                  width: 200,
+                  fit: BoxFit.contain,
+                ),
                 const SizedBox(height: 10),
                 const Text(
                   "BUS TRACKER",
