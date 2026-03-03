@@ -86,10 +86,19 @@ class _HomeScreenState extends State<HomeScreen> {
     }
   }
 
+  // ---------------------------------------------------
+  // 🔹 EMERGENCY ALERT (Admin Only - UPDATED WITH TIME BUFFER)
+  // ---------------------------------------------------
+
   void _listenForEmergencies() {
+    // 🔹 FIX: Subtract 10 minutes from current time.
+    // This ensures alerts are caught even if device clocks (PC vs Phone) are out of sync.
+    DateTime timeBuffer = DateTime.now().subtract(const Duration(minutes: 10));
+
     _emergencyAlertSubscription = FirebaseFirestore.instance
         .collection('emergency_alerts')
         .where('status', isEqualTo: 'ACTIVE')
+        .where('timestamp', isGreaterThan: timeBuffer) // 🔹 Uses the buffered time
         .snapshots()
         .listen((snapshot) {
       if (snapshot.docs.isNotEmpty && mounted) {
@@ -243,7 +252,16 @@ class _HomeScreenState extends State<HomeScreen> {
         _menuCard(icon: Icons.group, title: "Manage Users", onTap: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const ManageUsersScreen()))),
         _menuCard(icon: Icons.calendar_month, title: "Bus Schedule", onTap: () => Navigator.push(context, MaterialPageRoute(builder: (_) => BusScheduleScreen(isAdmin: true, isDriver: false)))),
         _menuCard(icon: Icons.campaign, title: "Send Alerts", onTap: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const AdminNotificationScreen()))),
-        _menuCard(icon: Icons.map, title: "Live Tracking", onTap: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const MapScreen(isAdmin: true, isDriver: false)))),
+        _menuCard(
+          icon: Icons.map, 
+          title: "Live Tracking", 
+          onTap: () => Navigator.push(
+            context, 
+            MaterialPageRoute(
+              builder: (_) => MapScreen(isAdmin: true, isDriver: false) 
+            )
+          )
+        ),
       ];
     } else if (_userRole == 'driver') {
       if (_assignedBusId.isEmpty) {
@@ -260,9 +278,13 @@ class _HomeScreenState extends State<HomeScreen> {
         _menuCard(
           icon: Icons.route, 
           title: "My Route Map", 
-          onTap: () => Navigator.push(context, MaterialPageRoute(builder: (_) => MapScreen(busId: _assignedBusId, isAdmin: false, isDriver: true))) 
+          onTap: () => Navigator.push(
+            context, 
+            MaterialPageRoute(
+              builder: (_) => MapScreen(busId: _assignedBusId, isAdmin: false, isDriver: true) 
+            )
+          ) 
         ),
-        // 🔹 NEW: MANAGE MY ROUTE CARD FOR DRIVERS
         _menuCard(
           icon: Icons.edit_location_alt, 
           title: "Manage My Route", 
@@ -279,8 +301,17 @@ class _HomeScreenState extends State<HomeScreen> {
       ];
     } else {
       return [
-        _menuCard(icon: Icons.directions_bus, title: "Track My Bus", onTap: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const MapScreen(isAdmin: false, isDriver: false)))),
-        _menuCard(icon: Icons.calendar_month, title: "Bus Schedule", onTap: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const BusScheduleScreen(isAdmin: false, isDriver: false)))),
+        _menuCard(
+          icon: Icons.directions_bus, 
+          title: "Track My Bus", 
+          onTap: () => Navigator.push(
+            context, 
+            MaterialPageRoute(
+              builder: (_) => MapScreen(isAdmin: false, isDriver: false) 
+            )
+          )
+        ),
+        _menuCard(icon: Icons.calendar_month, title: "Bus Schedule", onTap: () => Navigator.push(context, MaterialPageRoute(builder: (_) => BusScheduleScreen(isAdmin: false, isDriver: false)))),
       ];
     }
   }

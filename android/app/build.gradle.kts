@@ -14,7 +14,7 @@ android {
     ndkVersion = flutter.ndkVersion
 
     compileOptions {
-        // 👇 1. ENABLE DESUGARING HERE
+        // ✅ 1. Enabled Desugaring for better compatibility with Firebase
         isCoreLibraryDesugaringEnabled = true
 
         sourceCompatibility = JavaVersion.VERSION_11
@@ -26,23 +26,21 @@ android {
     }
 
     defaultConfig {
-        // TODO: Specify your own unique Application ID (https://developer.android.com/studio/build/application-id.html).
         applicationId = "com.example.college_bus_tracker"
         
-        // 👇 UPDATED: Set minSdk to 21 (Required for Google Maps)
+        // ✅ 2. Set minSdk to 21 (CRITICAL: Required for Google Maps & Firebase)
         minSdk = flutter.minSdkVersion 
         
         targetSdk = flutter.targetSdkVersion
         versionCode = flutter.versionCode
         versionName = flutter.versionName
         
-        // MultiDex is often required when adding Firebase + Desugaring
+        // ✅ 3. Enabled MultiDex (Required when using multiple Firebase SDKs)
         multiDexEnabled = true 
     }
 
     buildTypes {
         release {
-            // TODO: Add your own signing config for the release build.
             // Signing with the debug keys for now, so `flutter run --release` works.
             signingConfig = signingConfigs.getByName("debug")
         }
@@ -53,7 +51,7 @@ flutter {
     source = "../.."
 }
 
-// 👇 2. ADD DEPENDENCIES BLOCK HERE (Fixed Syntax)
 dependencies {
+    // ✅ 4. Added the Desugaring library dependency
     coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.0.4")
 }

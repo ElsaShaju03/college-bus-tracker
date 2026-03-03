@@ -162,10 +162,12 @@ class BusScheduleScreen extends StatelessWidget {
                       itemBuilder: (context, index) {
                         var doc = buses[index]; 
                         var data = doc.data() as Map<String, dynamic>;
-                        bool isBusLive = data['isTripActive'] ?? false; // 🔹 Check trip status
+                        bool isBusLive = data['isTripActive'] ?? false; 
 
                         return GestureDetector(
                           onTap: () {
+                            // 🔹 NAVIGATION PASSES ALL ROLE FLAGS
+                            // If user is Student, both isAdmin and isDriver will be false.
                             Navigator.push(
                               context,
                               MaterialPageRoute(
@@ -198,7 +200,6 @@ class BusScheduleScreen extends StatelessWidget {
                                   child: Column(
                                     crossAxisAlignment: CrossAxisAlignment.start,
                                     children: [
-                                      // 🔹 ROW ADDED FOR BUS NUMBER AND LIVE INDICATOR
                                       Row(
                                         children: [
                                           Text(data['busNumber'] ?? "Bus No.", style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: cardTextColor)),
@@ -226,7 +227,6 @@ class BusScheduleScreen extends StatelessWidget {
                                   ),
                                 ),
                                 
-                                // 🔹 Updated Conditional Actions
                                 if (isAdmin) ...[
                                   IconButton(
                                     icon: const Icon(Icons.swap_horiz, color: Colors.orangeAccent),
@@ -242,7 +242,6 @@ class BusScheduleScreen extends StatelessWidget {
                                     onPressed: () => _deleteBus(context, doc.id),
                                   ),
                                 ] else if (isDriver && doc.id == assignedBusId) ...[
-                                  // 🔹 Driver sees Edit icon ONLY for their assigned bus
                                   IconButton(
                                     icon: const Icon(Icons.edit, color: Colors.white70),
                                     onPressed: () => Navigator.push(context, MaterialPageRoute(builder: (context) => EditRouteScreen(busId: doc.id, busNumber: data['busNumber'] ?? "Bus"))),

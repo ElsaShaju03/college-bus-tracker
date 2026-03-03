@@ -4,10 +4,12 @@ import 'package:google_maps_flutter/google_maps_flutter.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
+import 'package:firebase_database/firebase_database.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:flutter_polyline_points/flutter_polyline_points.dart';
-import 'package:vibration/vibration.dart'; // 🔹 Added vibration import
+import 'package:vibration/vibration.dart';
+import 'package:firebase_core/firebase_core.dart'; 
 
 class MapScreen extends StatefulWidget {
   final Map<String, dynamic>? routeData;
@@ -27,7 +29,7 @@ class MapScreen extends StatefulWidget {
   State<MapScreen> createState() => _MapScreenState();
 }
 
-class _MapScreenState extends State<MapScreen> {
+class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
   final Completer<GoogleMapController> _controller = Completer();
   final FlutterLocalNotificationsPlugin _notificationsPlugin =
       FlutterLocalNotificationsPlugin();
@@ -41,612 +43,404 @@ class _MapScreenState extends State<MapScreen> {
   List<LatLng> _polygonVertices = [];
   List<Map<String, dynamic>> _stops = [];
   Map<String, LatLng> _otherBuses = {};
+  List<DocumentSnapshot> _activeAlertDocs = []; 
+
+  // Animation
+  AnimationController? _animationController;
 
   // Tracking Variables
-  LatLng? _busLocation;
-  LatLng? _deviceLatLng;
+  LatLng? _busLocation;   
+  LatLng? _deviceLatLng;  
   double _busHeading = 0.0;
   double _busSpeed = 0.0;
-  bool _hasCentered = false;
   bool _isViolatingRoute = false;
   bool _isSOSLoading = false;
-  bool _isTripActive = false; // 🔹 Added to track trip status
+  bool _isTripActive = false;
 
-  // Emergency Prevention Flags
-  bool _speedAlertLogged = false;
   bool _geofenceAlertLogged = false;
 
   // Streams
-  StreamSubscription<DocumentSnapshot>? _busStreamSub;
-  StreamSubscription<QuerySnapshot>? _allBusesStreamSub;
+  StreamSubscription<DatabaseEvent>? _rtDbSubscription;
+  StreamSubscription<DatabaseEvent>? _allBusesStreamSub; 
   StreamSubscription<Position>? _positionStreamSub;
+  StreamSubscription<QuerySnapshot>? _alertsStreamSub;
 
   @override
   void initState() {
     super.initState();
-    // 🔹 Initialize trip status from routeData if available
+    // Clear previous state data
+    _busLocation = null;
+    _otherBuses = {};
+    _markers = {};
+
     if (widget.routeData != null) {
       _isTripActive = widget.routeData!['isTripActive'] ?? false;
-    }
-
-    if (widget.routeData == null && widget.busId != null) {
-      _fetchRouteDataManually();
-    } else {
       _loadRouteData();
       _startListeningToBus();
+    } else if (widget.busId != null) {
+      _fetchRouteDataManually();
     }
+    
     _initNotifications();
     _initLocationTracking();
-
-    if (widget.isAdmin || widget.isDriver) {
-      _startListeningToAllBuses();
+    //if (widget.isAdmin || widget.isDriver) {
+     // _startListeningToAllBuses();
+    //}
+    if (widget.isAdmin) {
+      _startListeningToActiveAlerts();
     }
   }
 
   @override
   void dispose() {
-    _busStreamSub?.cancel();
+    _rtDbSubscription?.cancel();
     _allBusesStreamSub?.cancel();
     _positionStreamSub?.cancel();
+    _alertsStreamSub?.cancel();
+    _animationController?.dispose();
     super.dispose();
   }
 
-  // ---------------------------------------------------
-  // 🔹 FETCH DATA MANUALLY
-  // ---------------------------------------------------
-  Future<void> _fetchRouteDataManually() async {
-    DocumentSnapshot doc = await FirebaseFirestore.instance
-        .collection('bus_schedules')
-        .doc(widget.busId)
-        .get();
-    if (doc.exists) {
-      var data = doc.data() as Map<String, dynamic>;
-      List<LatLng> stopPoints = [];
-      if (data['stops'] != null) {
-        for (var stop in data['stops']) {
-          stopPoints.add(LatLng(double.parse(stop['lat'].toString()),
-              double.parse(stop['lng'].toString())));
-        }
-      }
-      setState(() {
-        _isTripActive = data['isTripActive'] ?? false; // 🔹 Update trip status
-        _stops = (data['stops'] as List)
-            .map((s) => {"name": s['stopName'], "time": s['time'] ?? "--:--"})
-            .toList();
-        _generateAuthorizedZone(stopPoints);
-      });
-      await _fetchRoadSnappedRoute(stopPoints);
-
-      if (data['deviceId'] != null && data['deviceId'] != "") {
-        _startListeningToBus(manualDeviceId: data['deviceId']);
-      }
+  void _animateBusMarker(LatLng newPosition, double newRotation) {
+    if (_busLocation == null) {
+      _busLocation = newPosition;
+      _busHeading = newRotation;
+      _updateMapVisuals();
+      return;
     }
-  }
+    if (_busLocation!.latitude == newPosition.latitude &&
+        _busLocation!.longitude == newPosition.longitude) return;
 
-  // ---------------------------------------------------
-  // 🔹 LISTENING TO ALL ACTIVE BUSES
-  // ---------------------------------------------------
-  void _startListeningToAllBuses() {
-    _allBusesStreamSub = FirebaseFirestore.instance
-        .collection('devices')
-        .snapshots()
-        .listen((snapshot) {
-      Map<String, LatLng> tempBuses = {};
-      for (var doc in snapshot.docs) {
-        String linkedId = widget.routeData?['deviceId'] ?? widget.busId ?? "";
-        if (doc.id == linkedId) continue;
-        var data = doc.data();
-        tempBuses[doc.id] = LatLng(data['currentLat'], data['currentLng']);
-      }
+    _animationController?.stop();
+    _animationController = AnimationController(
+        duration: const Duration(milliseconds: 2000), vsync: this);
+    final latTween = Tween<double>(begin: _busLocation!.latitude, end: newPosition.latitude);
+    final lngTween = Tween<double>(begin: _busLocation!.longitude, end: newPosition.longitude);
+    final rotTween = Tween<double>(begin: _busHeading, end: newRotation);
+    final Animation<double> animation =
+        CurvedAnimation(parent: _animationController!, curve: Curves.easeInOut);
+    _animationController!.addListener(() {
       setState(() {
-        _otherBuses = tempBuses;
+        _busLocation = LatLng(latTween.evaluate(animation), lngTween.evaluate(animation));
+        _busHeading = rotTween.evaluate(animation);
         _updateMapVisuals();
       });
     });
-  }
-
-  // ---------------------------------------------------
-  // 🔹 EMERGENCY LOGIC
-  // ---------------------------------------------------
-  Future<void> _triggerEmergency({required String type, String? detail}) async {
-    try {
-      final user = FirebaseAuth.instance.currentUser;
-      await FirebaseFirestore.instance.collection('emergency_alerts').add({
-        'busNumber': widget.routeData?['busNumber'] ?? 'Assigned Bus',
-        'busId': widget.busId,
-        'type': type,
-        'detail': detail ?? '',
-        'location': {
-          'lat': _busLocation?.latitude,
-          'lng': _busLocation?.longitude
-        },
-        'speed': _busSpeed,
-        'status': 'ACTIVE',
-        'timestamp': FieldValue.serverTimestamp(),
-        'triggeredBy': user?.email ?? 'Unknown User',
-      });
-    } catch (e) {
-      debugPrint("SOS Error: $e");
-    }
-  }
-
-  void _showSOSConfirmDialog() {
-    showDialog(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        title: const Text("🚨 Send SOS?"),
-        content:
-            const Text("Notify management that you are in danger or feel unsafe."),
-        actions: [
-          TextButton(
-              onPressed: () => Navigator.pop(ctx), child: const Text("CANCEL")),
-          ElevatedButton(
-              style: ElevatedButton.styleFrom(backgroundColor: Colors.red),
-              onPressed: () {
-                Navigator.pop(ctx);
-                _sendSilentSOS();
-              },
-              child: const Text("SEND SOS"))
-        ],
-      ),
-    );
-  }
-
-  Future<void> _sendSilentSOS() async {
-    setState(() => _isSOSLoading = true);
-    await _triggerEmergency(type: 'SILENT_SOS', detail: 'Manual Panic Trigger');
-    setState(() => _isSOSLoading = false);
-    ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text("Alert Sent"), backgroundColor: Colors.red));
-  }
-
-  // ---------------------------------------------------
-  // 🔹 GEOMETRY & GEOFENCING (UPDATED FOR IN-APP FEEDBACK)
-  // ---------------------------------------------------
-  bool _isPointInPolygon(LatLng point, List<LatLng> polygon) {
-    int i, j = polygon.length - 1;
-    bool oddNodes = false;
-    double x = point.longitude;
-    double y = point.latitude;
-    for (i = 0; i < polygon.length; i++) {
-      if ((polygon[i].latitude < y && polygon[j].latitude >= y ||
-              polygon[j].latitude < y && polygon[i].latitude >= y) &&
-          (polygon[i].longitude <= x || polygon[j].longitude <= x)) {
-        if (polygon[i].longitude +
-                (y - polygon[i].latitude) /
-                    (polygon[j].latitude - polygon[i].latitude) *
-                    (polygon[j].longitude - polygon[i].longitude) <
-            x) oddNodes = !oddNodes;
-      }
-      j = i;
-    }
-    return oddNodes;
-  }
-
-  void _checkSecurityStatus(LatLng busPos) {
-    if (_polygonVertices.isEmpty) return;
-    bool isInside = _isPointInPolygon(busPos, _polygonVertices);
-    if (!isInside && !_isViolatingRoute) {
-      setState(() => _isViolatingRoute = true);
-      
-      // 🔹 High-priority local notification
-      _showNotification("🚨 ROUTE VIOLATION", "Vehicle outside authorized area!");
-
-      if (widget.isDriver) {
-        Vibration.vibrate(duration: 1000); 
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text("🚨 WARNING: YOU ARE OUTSIDE THE AUTHORIZED ROUTE!"),
-            backgroundColor: Colors.red,
-            duration: Duration(seconds: 5),
-          ),
-        );
-      }
-
-      if (!_geofenceAlertLogged) {
-        _triggerEmergency(type: 'RULE_BREAK', detail: 'Route Deviation Detected');
-        _geofenceAlertLogged = true;
-      }
-    } else if (isInside && _isViolatingRoute) {
-      setState(() => _isViolatingRoute = false);
-      _geofenceAlertLogged = false;
-
-      if (widget.isDriver) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text("✅ Back on Route"), backgroundColor: Colors.green),
-        );
-      }
-    }
-    _generateAuthorizedZone(_extractStopCoords());
+    _animationController!.forward();
   }
 
   void _generateAuthorizedZone(List<LatLng> stopPoints) {
-    if (stopPoints.length < 2) return;
-    double buffer = 0.004;
-    List<LatLng> expanded = [];
-    for (var p in stopPoints) {
-      expanded.addAll([
-        p,
-        LatLng(p.latitude + buffer, p.longitude),
-        LatLng(p.latitude - buffer, p.longitude),
-        LatLng(p.latitude, p.longitude + buffer),
-        LatLng(p.latitude, p.longitude - buffer)
-      ]);
+    if (stopPoints.length < 3) return; 
+    List<LatLng> hull = _getConvexHull(stopPoints);
+    _polygonVertices = hull;
+    if (widget.isAdmin || widget.isDriver) {
+      setState(() {
+        _polygons = {
+          Polygon(
+            polygonId: const PolygonId("geo"),
+            points: _polygonVertices,
+            strokeWidth: 3,
+            strokeColor: _isViolatingRoute ? Colors.red : Colors.green,
+            fillColor: _isViolatingRoute ? Colors.red.withAlpha(50) : Colors.green.withAlpha(30),
+          )
+        };
+      });
     }
-    _polygonVertices = _computeConvexHull(expanded);
-    setState(() {
-      _polygons = {
-        Polygon(
-          polygonId: const PolygonId("geo"),
-          points: _polygonVertices,
-          strokeWidth: 2,
-          strokeColor: _isViolatingRoute ? Colors.red : Colors.green,
-          fillColor: _isViolatingRoute
-              ? Colors.red.withOpacity(0.15)
-              : Colors.green.withOpacity(0.1),
-        )
-      };
-    });
   }
 
-  double _crossProduct(LatLng o, LatLng a, LatLng b) {
-    return (a.longitude - o.longitude) * (b.latitude - o.latitude) -
-        (a.latitude - o.latitude) * (b.longitude - o.longitude);
-  }
-
-  List<LatLng> _computeConvexHull(List<LatLng> points) {
-    if (points.length <= 2) return points;
-    points.sort((a, b) {
-      int comp = a.longitude.compareTo(b.longitude);
-      return comp == 0 ? a.latitude.compareTo(b.latitude) : comp;
-    });
+  List<LatLng> _getConvexHull(List<LatLng> points) {
+    if (points.length <= 3) return points;
+    List<LatLng> sorted = List.from(points);
+    sorted.sort((a, b) => a.latitude != b.latitude ? a.latitude.compareTo(b.latitude) : a.longitude.compareTo(b.longitude));
     List<LatLng> lower = [];
-    for (var p in points) {
-      while (lower.length >= 2 &&
-          _crossProduct(lower[lower.length - 2], lower.last, p) <= 0) {
-        lower.removeLast();
-      }
+    for (var p in sorted) {
+      while (lower.length >= 2 && _crossProduct(lower[lower.length - 2], lower.last, p) <= 0) lower.removeLast();
       lower.add(p);
     }
     List<LatLng> upper = [];
-    for (var p in points.reversed) {
-      while (upper.length >= 2 &&
-          _crossProduct(upper[upper.length - 2], upper.last, p) <= 0) {
-        upper.removeLast();
-      }
+    for (var p in sorted.reversed) {
+      while (upper.length >= 2 && _crossProduct(upper[upper.length - 2], upper.last, p) <= 0) upper.removeLast();
       upper.add(p);
     }
-    lower.removeLast();
-    upper.removeLast();
-    return [...lower, ...upper];
+    lower.removeLast(); upper.removeLast();
+    return lower + upper;
   }
 
-  // ---------------------------------------------------
-  // 🔹 RENDERING & UI
-  // ---------------------------------------------------
+  double _crossProduct(LatLng a, LatLng b, LatLng c) {
+    return (b.longitude - a.longitude) * (c.latitude - a.latitude) - (b.latitude - a.latitude) * (c.longitude - a.longitude);
+  }
+
+  void _checkSecurityStatus(LatLng busPos) {
+    // REMOVED: if (!_isTripActive) return; 
+    // Now it will check even if the trip is not active.
+
+    if (_polygonVertices.isEmpty) return;
+    
+    bool isInside = _isPointInPolygon(busPos, _polygonVertices);
+    String busNum = widget.routeData?['busNumber']?.toString() ?? "Unknown";
+
+    if (!isInside) {
+      // Only send notification if we haven't already flagged this violation 
+      // OR if the app just started and found the bus outside.
+      if (!_isViolatingRoute) {
+        setState(() => _isViolatingRoute = true);
+
+        if (widget.isDriver) {
+          Vibration.vibrate(duration: 1000);
+          _showNotification("🚨 ROUTE VIOLATION", "Warning! You are driving in unauthorized area!");
+        }
+
+        if (widget.isAdmin) {
+          Vibration.vibrate(duration: 1000);
+          _showNotification("🚨 ROUTE VIOLATION", "Bus no $busNum is outside authorized area");
+        }
+      }
+    } else {
+      // If the bus is back inside, reset the flag so it can alert again next time it leaves
+      if (_isViolatingRoute) {
+        setState(() => _isViolatingRoute = false);
+      }
+    }
+    
+    // Always refresh the zone visual based on the stops
+    _generateAuthorizedZone(_extractStopCoords());
+  }
+
+  void _startListeningToActiveAlerts() {
+    _alertsStreamSub = FirebaseFirestore.instance
+        .collection('emergency_alerts')
+        .where('status', isEqualTo: 'ACTIVE')
+        .snapshots()
+        .listen((snapshot) {
+      setState(() {
+        _activeAlertDocs = snapshot.docs;
+      });
+    });
+  }
+
+  Future<void> _resolveAlert(String docId) async {
+    await FirebaseFirestore.instance
+        .collection('emergency_alerts')
+        .doc(docId)
+        .update({'status': 'RESOLVED'});
+  }
+
   void _updateMapVisuals() {
     Set<Marker> newMarkers = {};
     List<LatLng> stopCoords = _extractStopCoords();
     for (int i = 0; i < stopCoords.length; i++) {
-      newMarkers.add(Marker(
-          markerId: MarkerId('s$i'),
-          position: stopCoords[i],
-          icon: BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueRose),
-          infoWindow: InfoWindow(title: _stops[i]['name'])));
+      newMarkers.add(Marker(markerId: MarkerId('s$i'), position: stopCoords[i], icon: BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueRose), infoWindow: InfoWindow(title: i < _stops.length ? _stops[i]['name'] : "Stop")));
     }
-
     if (_busLocation != null) {
-      newMarkers.add(Marker(
-          markerId: const MarkerId('live'),
-          position: _busLocation!,
-          rotation: _busHeading,
-          anchor: const Offset(0.5, 0.5),
-          icon: BitmapDescriptor.defaultMarkerWithHue(60.0),
-          infoWindow: InfoWindow(
-              title: "Current Bus",
-              snippet: "${_busSpeed.toStringAsFixed(1)} km/h"),
-          zIndex: 10));
+      newMarkers.add(Marker(markerId: const MarkerId('live'), position: _busLocation!, rotation: _busHeading, anchor: const Offset(0.5, 0.5), icon: BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueBlue), infoWindow: InfoWindow(title: "📍 Live Bus Location", snippet: "${_busSpeed.toStringAsFixed(1)} km/h"), zIndex: 15));
     }
-
-    if (widget.isAdmin || widget.isDriver) {
-      _otherBuses.forEach((id, pos) {
-        newMarkers.add(Marker(
-            markerId: MarkerId(id),
-            position: pos,
-            icon: BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueAzure),
-            infoWindow: InfoWindow(title: "Other Bus: $id")));
-      });
+    if (_deviceLatLng != null) {
+      newMarkers.add(Marker(markerId: const MarkerId('user_location'), position: _deviceLatLng!, icon: BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueCyan), infoWindow: const InfoWindow(title: "📱 Your Position"), zIndex: 5));
     }
-
+    //if (widget.isAdmin || widget.isDriver) {
+     // _otherBuses.forEach((id, pos) {
+      //  newMarkers.add(Marker(markerId: MarkerId(id), position: pos, icon: BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueAzure), infoWindow: InfoWindow(title: "Other Bus: $id")));
+     // });
+    //}
     setState(() {
       _markers = newMarkers;
-      _polylines = {
-        Polyline(
-            polylineId: const PolylineId('rl'),
-            points: _roadPoints.isEmpty ? _extractStopCoords() : _roadPoints,
-            color: Colors.blueAccent,
-            width: 5)
-      };
+      _polylines = { Polyline(polylineId: const PolylineId('rl'), points: _roadPoints.isEmpty ? stopCoords : _roadPoints, color: Colors.blueAccent, width: 5) };
     });
   }
 
-  // ---------------------------------------------------
-  // 🔹 SYSTEM HELPERS
-  // ---------------------------------------------------
-  void _startListeningToBus({String? manualDeviceId}) {
-    String docId = manualDeviceId ??
-        (widget.routeData?['deviceId'] ?? (widget.busId ?? 'test_bus'));
+  Future<void> _launchLiveNavigation() async {
+    if (_busLocation == null) return;
+    String origin = _deviceLatLng != null ? "${_deviceLatLng!.latitude},${_deviceLatLng!.longitude}" : "current+location";
+    String destination = "${_busLocation!.latitude},${_busLocation!.longitude}";
+    final Uri url = Uri.parse("https://www.google.com/maps/dir/?api=1&origin=$origin&destination=$destination&travelmode=driving&dir_action=navigate");
+    if (await canLaunchUrl(url)) await launchUrl(url, mode: LaunchMode.externalApplication);
+  }
+
+  void _startListeningToBus({Map<String, dynamic>? manualData}) {
+    _rtDbSubscription?.cancel();
     
-    _busStreamSub?.cancel(); 
+    // Explicitly nullify old location before starting new listener
+    setState(() { _busLocation = null; });
+
+    String devId = (manualData?['deviceId'] ?? widget.routeData?['deviceId'] ?? "device_01").toString().trim();
+    String nodePath = "${devId}_live";
     
-    _busStreamSub = FirebaseFirestore.instance
-        .collection('devices')
-        .doc(docId)
-        .snapshots()
-        .listen((snapshot) {
-      if (snapshot.exists && snapshot.data() != null) {
-        var data = snapshot.data() as Map<String, dynamic>;
-        LatLng newPos = LatLng((data['currentLat'] as num).toDouble(),
-            (data['currentLng'] as num).toDouble());
-        double speed = (data['speed'] ?? 0.0).toDouble();
-        if (speed > 60.0 && !_speedAlertLogged) {
-          _triggerEmergency(type: 'RULE_BREAK', detail: 'Overspeeding: $speed');
-          _speedAlertLogged = true;
-        } else if (speed <= 60.0) {
-          _speedAlertLogged = false;
-        }
-        _checkSecurityStatus(newPos);
-        if (mounted) {
-          setState(() {
-            _busLocation = newPos;
-            _busHeading = (data['heading'] ?? 0.0).toDouble();
-            _busSpeed = speed;
-            _updateMapVisuals();
-          });
-          if (!_hasCentered) {
-            _fitBounds();
-            _hasCentered = true;
-          }
-        }
-      }
+    DatabaseReference busRef = FirebaseDatabase.instanceFor(app: Firebase.app(), databaseURL: 'https://college-bus-tracker-33e19-default-rtdb.asia-southeast1.firebasedatabase.app').ref(nodePath);
+    
+    _rtDbSubscription = busRef.onValue.listen((DatabaseEvent event) {
+      final data = event.snapshot.value;
+      if (data == null || data is! Map) return;
+      try {
+        double lat = double.parse(data['latitude'].toString());
+        double lng = double.parse(data['longitude'].toString());
+        double speed = double.parse((data['speed'] ?? 0.0).toString());
+        double heading = double.parse((data['heading'] ?? 0.0).toString());
+        LatLng newTarget = LatLng(lat, lng);
+        _animateBusMarker(newTarget, heading);
+        if (mounted) { setState(() { _busLocation = newTarget; _busSpeed = speed; _busHeading = heading; }); _checkSecurityStatus(newTarget); }
+      } catch (e) { debugPrint("RTDB Parse Error: $e"); }
     });
   }
 
-  List<LatLng> _extractStopCoords() {
-    if (widget.routeData?['stops'] != null) {
-      return (widget.routeData!['stops'] as List)
-          .map((s) => LatLng(double.parse(s['lat'].toString()),
-              double.parse(s['lng'].toString())))
-          .toList();
+  List<LatLng> _extractStopCoords({Map<String, dynamic>? manualData}) {
+    var data = manualData ?? widget.routeData;
+    var stopsData = data?['stops'] ?? data?['standardRoute'];
+    if (stopsData != null && stopsData is List) {
+      return stopsData.map((s) => LatLng(double.parse(s['lat'].toString()), double.parse(s['lng'].toString()))).toList();
     }
     return [];
   }
 
-  void _loadRouteData() async {
-    if (widget.routeData?['stops'] != null) {
-      List<LatLng> stopPoints = _extractStopCoords();
-      setState(() {
-        _stops = (widget.routeData!['stops'] as List)
-            .map((s) => {"name": s['stopName'], "time": s['time'] ?? "--:--"})
-            .toList();
-        _generateAuthorizedZone(stopPoints);
-      });
+  void _loadRouteData({Map<String, dynamic>? manualData}) async {
+    var data = manualData ?? widget.routeData;
+    var stopsData = data?['stops'] ?? data?['standardRoute'];
+    if (stopsData != null) {
+      List<LatLng> stopPoints = _extractStopCoords(manualData: manualData);
+      setState(() { _stops = (stopsData as List).map((s) => {"name": s['stopName'], "time": s['time'] ?? "--:--"}).toList().cast<Map<String, dynamic>>(); });
       await _fetchRoadSnappedRoute(stopPoints);
+      _generateAuthorizedZone(stopPoints);
+      _updateMapVisuals();
+    }
+  }
+
+  Future<void> _fetchRouteDataManually() async {
+    // Clear old state before manual fetch
+    setState(() {
+      _busLocation = null;
+      _otherBuses = {};
+      _markers = {};
+      _roadPoints = [];
+    });
+
+    DocumentSnapshot doc = await FirebaseFirestore.instance.collection('bus_schedules').doc(widget.busId).get();
+    if (doc.exists) {
+      var data = doc.data() as Map<String, dynamic>;
+      _startListeningToBus(manualData: data);
+      _loadRouteData(manualData: data);
+      // Ensure "All Buses" listener filters based on the newly fetched ID
+      if (widget.isAdmin || widget.isDriver) {
+        _startListeningToAllBuses(manualDeviceId: data['deviceId']);
+      }
     }
   }
 
   Future<void> _fetchRoadSnappedRoute(List<LatLng> stopPoints) async {
     PolylinePoints polylinePoints = PolylinePoints(apiKey: googleApiKey);
     try {
-      PolylineResult result = await polylinePoints.getRouteBetweenCoordinates(
-        request: PolylineRequest(
-            origin: PointLatLng(
-                stopPoints.first.latitude, stopPoints.first.longitude),
-            destination: PointLatLng(
-                stopPoints.last.latitude, stopPoints.last.longitude),
-            mode: TravelMode.driving),
-      );
-      if (result.points.isNotEmpty) {
-        setState(() {
-          _roadPoints =
-              result.points.map((p) => LatLng(p.latitude, p.longitude)).toList();
-          _updateMapVisuals();
-        });
-      }
-    } catch (e) {
-      setState(() {
-        _roadPoints = stopPoints;
-        _updateMapVisuals();
-      });
-    }
+      PolylineResult result = await polylinePoints.getRouteBetweenCoordinates(request: PolylineRequest(origin: PointLatLng(stopPoints.first.latitude, stopPoints.first.longitude), destination: PointLatLng(stopPoints.last.latitude, stopPoints.last.longitude), mode: TravelMode.driving));
+      if (result.points.isNotEmpty) { setState(() { _roadPoints = result.points.map((p) => LatLng(p.latitude, p.longitude)).toList(); }); }
+    } catch (e) { setState(() { _roadPoints = stopPoints; }); }
   }
 
-  // ---------------------------------------------------
-  // 🔹 NAVIGATE TO BUS (OPTION B: OFFICIAL ROUTE IN EXTERNAL MAP)
-  // ---------------------------------------------------
-  Future<void> _launchLiveNavigation() async {
-    // 1. Extract coordinates of the official stops
-    List<LatLng> stops = _extractStopCoords();
+  bool _isPointInPolygon(LatLng point, List<LatLng> polygon) {
+    int i, j = polygon.length - 1; bool oddNodes = false; double x = point.longitude; double y = point.latitude;
+    for (i = 0; i < polygon.length; i++) { if ((polygon[i].latitude < y && polygon[j].latitude >= y || (polygon[j].latitude < y && polygon[i].latitude >= y)) && (polygon[i].longitude <= x || polygon[j].longitude <= x)) { if (polygon[i].longitude + (y - polygon[i].latitude) / (polygon[j].latitude - polygon[i].latitude) * (polygon[j].longitude - polygon[i].longitude) < x) oddNodes = !oddNodes; } j = i; }
+    return oddNodes;
+  }
 
-    if (stops.isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text("No official route stops found.")));
-      return;
-    }
-
-    // 2. Set Origin: The very first stop of the bus route
-    final String origin = "${stops.first.latitude},${stops.first.longitude}";
-
-    // 3. Set Destination: The very last stop of the bus route
-    final String destination = "${stops.last.latitude},${stops.last.longitude}";
-
-    // 4. Set Waypoints: Pass intermediate stops to force the specific route
-    String waypoints = "";
-    if (stops.length > 2) {
-      List<LatLng> intermediateStops = stops.sublist(1, stops.length - 1);
-
-      // Google Maps mobile URLs support a limited number of waypoints (~12-15)
-      if (intermediateStops.length > 12) {
-        intermediateStops = intermediateStops.take(12).toList();
-      }
-
-      waypoints = "&waypoints=" +
-          intermediateStops.map((p) => "${p.latitude},${p.longitude}").join('|');
-    }
-
-    // 5. Construct URL (Travel mode: driving)
-    final Uri url = Uri.parse(
-        "https://www.google.com/maps/dir/?api=1&origin=$origin&destination=$destination$waypoints&travelmode=driving");
-
-    // 6. Launch external application
-    if (await canLaunchUrl(url)) {
-      await launchUrl(url, mode: LaunchMode.externalApplication);
-    } else {
-      await launchUrl(url, mode: LaunchMode.externalApplication);
-    }
+  void _startListeningToAllBuses({String? manualDeviceId}) {
+    _allBusesStreamSub?.cancel();
+    String currentDeviceId = (manualDeviceId ?? widget.routeData?['deviceId'] ?? widget.busId ?? "device_01").toString();
+    
+    DatabaseReference rootRef = FirebaseDatabase.instanceFor(app: Firebase.app(), databaseURL: 'https://college-bus-tracker-33e19-default-rtdb.asia-southeast1.firebasedatabase.app').ref();
+    
+    _allBusesStreamSub = rootRef.onValue.listen((DatabaseEvent event) {
+      final data = event.snapshot.value; if (data == null || data is! Map) return; Map<String, LatLng> tempBuses = {};
+      (data as Map).forEach((key, value) { 
+        String nodeKey = key.toString(); 
+        if (nodeKey.endsWith('_live') && nodeKey != "${currentDeviceId}_live") { 
+          if (value is Map && value['latitude'] != null) { 
+            tempBuses[nodeKey.replaceAll('_live', '')] = LatLng(double.parse(value['latitude'].toString()), double.parse(value['longitude'].toString())); 
+          } 
+        } 
+      });
+      if (mounted) setState(() { _otherBuses = tempBuses; _updateMapVisuals(); });
+    });
   }
 
   Future<void> _initNotifications() async {
-    await _notificationsPlugin
-        .resolvePlatformSpecificImplementation<
-            AndroidFlutterLocalNotificationsPlugin>()
-        ?.requestNotificationsPermission();
-
-    await _notificationsPlugin.initialize(const InitializationSettings(
-        android: AndroidInitializationSettings('@mipmap/ic_launcher')));
+    await _notificationsPlugin.resolvePlatformSpecificImplementation<AndroidFlutterLocalNotificationsPlugin>()?.requestNotificationsPermission();
+    await _notificationsPlugin.initialize(const InitializationSettings(android: AndroidInitializationSettings('@mipmap/ic_launcher')));
   }
 
   Future<void> _showNotification(String t, String b) async {
-    await _notificationsPlugin.show(
-        0,
-        t,
-        b,
-        const NotificationDetails(
-            android: AndroidNotificationDetails('alert', 'Alerts',
-                importance: Importance.max,
-                priority: Priority.high,
-                color: Colors.red)));
+    await _notificationsPlugin.show(0, t, b, const NotificationDetails(android: AndroidNotificationDetails('alert', 'Alerts', importance: Importance.max, priority: Priority.high, color: Colors.red)));
   }
 
   Future<void> _initLocationTracking() async {
     LocationPermission p = await Geolocator.requestPermission();
-    if (p != LocationPermission.denied && p != LocationPermission.deniedForever) {
-      _positionStreamSub = Geolocator.getPositionStream().listen((pos) {
-        if (mounted)
-          setState(() {
-            _deviceLatLng = LatLng(pos.latitude, pos.longitude);
-          });
-      });
-    }
+    if (p != LocationPermission.denied) { _positionStreamSub = Geolocator.getPositionStream().listen((pos) { if (mounted) setState(() { _deviceLatLng = LatLng(pos.latitude, pos.longitude); _updateMapVisuals(); }); }); }
   }
 
-  Future<void> _fitBounds() async {
-    if (_controller.isCompleted && _busLocation != null) {
-      final c = await _controller.future;
-      c.animateCamera(CameraUpdate.newLatLngZoom(_busLocation!, 15));
-    }
+  Future<void> _fitBounds() async { if (_controller.isCompleted && _busLocation != null) { final c = await _controller.future; c.animateCamera(CameraUpdate.newLatLngZoom(_busLocation!, 17)); } }
+
+  void _showSOSConfirmDialog() {
+    showDialog(context: context, builder: (ctx) => AlertDialog(title: const Text("🚨 Send SOS?"), content: const Text("Notify management that you are in danger."), actions: [TextButton(onPressed: () => Navigator.pop(ctx), child: const Text("CANCEL")), ElevatedButton(style: ElevatedButton.styleFrom(backgroundColor: Colors.red), onPressed: () { Navigator.pop(ctx); _sendSilentSOS(); }, child: const Text("SEND SOS"))]));
   }
 
-  List<LatLng> get _minimalPolygonVertices {
-    List<LatLng> left = [], right = [];
-    List<LatLng> stopPoints = _extractStopCoords();
-    if (stopPoints.isEmpty) return [];
-    double buffer = 0.004;
-    for (var stop in stopPoints) {
-      left.add(LatLng(stop.latitude + buffer, stop.longitude - buffer));
-      right.insert(0, LatLng(stop.latitude - buffer, stop.longitude + buffer));
-    }
-    return [...left, ...right];
+  Future<void> _triggerEmergency({required String type, String? detail}) async {
+    await FirebaseFirestore.instance.collection('emergency_alerts').add({
+      'busNumber': widget.routeData?['busNumber'] ?? 'Unknown',
+      'type': type,
+      'detail': detail ?? 'Manual SOS Triggered',
+      'status': 'ACTIVE',
+      'timestamp': FieldValue.serverTimestamp(),
+      'triggeredBy': FirebaseAuth.instance.currentUser?.email ?? 'User'
+    });
+  }
+
+  Future<void> _sendSilentSOS() async {
+    setState(() => _isSOSLoading = true);
+    await _triggerEmergency(type: 'SILENT_SOS');
+    setState(() => _isSOSLoading = false);
   }
 
   @override
   Widget build(BuildContext context) {
     final bool isDark = Theme.of(context).brightness == Brightness.dark;
     return Scaffold(
-      appBar:
-          AppBar(title: Text(widget.routeData?['busNumber'] ?? 'Bus Tracker')),
+      appBar: AppBar(title: Text(widget.routeData?['busNumber']?.toString() ?? 'Bus Tracker')),
       floatingActionButton: Column(
         mainAxisAlignment: MainAxisAlignment.end,
         children: [
-          if (!widget.isAdmin)
-            FloatingActionButton(
-                heroTag: 'sos',
-                backgroundColor: Colors.red,
-                onPressed: _isSOSLoading ? null : _showSOSConfirmDialog,
-                child: _isSOSLoading
-                    ? const CircularProgressIndicator(color: Colors.white)
-                    : const Icon(Icons.emergency, color: Colors.white)),
+          if (!widget.isAdmin) FloatingActionButton(heroTag: 'sos', backgroundColor: Colors.red, onPressed: _isSOSLoading ? null : _showSOSConfirmDialog, child: _isSOSLoading ? const CircularProgressIndicator(color: Colors.white) : const Icon(Icons.emergency, color: Colors.white)),
           const SizedBox(height: 10),
-          FloatingActionButton.extended(
-              heroTag: 'nav',
-              onPressed: _launchLiveNavigation,
-              icon: const Icon(Icons.navigation),
-              label: const Text("Navigate"),
-              backgroundColor:
-                  _isViolatingRoute ? Colors.red : Colors.blueAccent),
+          FloatingActionButton(mini: true, heroTag: 'center', backgroundColor: Colors.white, onPressed: _fitBounds, child: const Icon(Icons.center_focus_strong, color: Colors.black)),
+          const SizedBox(height: 10),
+          FloatingActionButton.extended(heroTag: 'nav', onPressed: _launchLiveNavigation, icon: const Icon(Icons.navigation), label: const Text("Navigate"), backgroundColor: _isViolatingRoute ? Colors.red : Colors.blueAccent),
         ],
       ),
-      body: Column(
+      body: Stack(
         children: [
-          if (_isViolatingRoute && (widget.isAdmin || widget.isDriver))
-            Container(
-                width: double.infinity,
-                color: Colors.red,
-                padding: const EdgeInsets.all(10),
-                child: const Center(
-                    child: Text("VEHICLE OUTSIDE AUTHORIZED AREA",
-                        style: TextStyle(
-                            color: Colors.white, fontWeight: FontWeight.bold)))),
-          Expanded(
-              flex: 7,
-              child: GoogleMap(
-                initialCameraPosition:
-                    const CameraPosition(target: LatLng(8.5576, 76.8604), zoom: 14),
-                markers: _markers,
-                polylines: _polylines,
-                polygons: (widget.isAdmin || widget.isDriver) ? _polygons : {},
-                myLocationEnabled: true,
-                onMapCreated: (c) => _controller.complete(c),
-              )),
-          Expanded(
-              flex: 3,
+          Column(
+            children: [
+              if (_isViolatingRoute && (widget.isAdmin || widget.isDriver)) Container(width: double.infinity, color: Colors.red, padding: const EdgeInsets.all(10), child: const Center(child: Text("VEHICLE OUTSIDE AUTHORIZED AREA", style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold)))),
+              Expanded(flex: 7, child: GoogleMap(initialCameraPosition: const CameraPosition(target: LatLng(8.5576, 76.8604), zoom: 14), markers: _markers, polylines: _polylines, polygons: (widget.isAdmin || widget.isDriver) ? _polygons : {}, myLocationEnabled: true, onMapCreated: (c) => _controller.complete(c))),
+              Expanded(flex: 3, child: Container(color: isDark ? const Color(0xFF121212) : Colors.white, child: Column(children: [Container(width: double.infinity, padding: const EdgeInsets.symmetric(vertical: 8), color: _isTripActive ? Colors.green.withOpacity(0.1) : Colors.orange.withOpacity(0.1), child: Center(child: Text(_isTripActive ? "Status: On Route" : "Status: Trip Not Started / In Depot", style: TextStyle(color: _isTripActive ? Colors.green : Colors.orange.shade900, fontWeight: FontWeight.bold, fontSize: 14)))), const Divider(height: 1), Expanded(child: ListView.builder(itemCount: _stops.length, itemBuilder: (context, i) => ListTile(leading: Text(_stops[i]['time'] ?? "--:--", style: const TextStyle(fontWeight: FontWeight.bold)), title: Text(_stops[i]['name'] ?? "Stop"))))]))),
+            ],
+          ),
+          if (widget.isAdmin && _activeAlertDocs.isNotEmpty)
+            Positioned(
+              top: 10,
+              left: 10,
+              right: 10,
               child: Container(
-                  color: isDark ? const Color(0xFF121212) : Colors.white,
-                  child: Column(
-                    children: [
-                      Container(
-                        width: double.infinity,
-                        padding: const EdgeInsets.symmetric(vertical: 8),
-                        color: _isTripActive
-                            ? Colors.green.withOpacity(0.1)
-                            : Colors.orange.withOpacity(0.1),
-                        child: Center(
-                          child: Text(
-                            _isTripActive
-                                ? "Status: On Route"
-                                : "Status: Trip Not Started / In Depot",
-                            style: TextStyle(
-                              color: _isTripActive
-                                  ? Colors.green
-                                  : Colors.orange.shade900,
-                              fontWeight: FontWeight.bold,
-                              fontSize: 14,
-                            ),
-                          ),
-                        ),
+                padding: const EdgeInsets.all(8),
+                decoration: BoxDecoration(color: Colors.red.withOpacity(0.9), borderRadius: BorderRadius.circular(8)),
+                child: Column(
+                  children: _activeAlertDocs.map((doc) {
+                    final data = doc.data() as Map<String, dynamic>;
+                    return ListTile(
+                      title: Text("SOS: Bus ${data['busNumber']}", style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
+                      trailing: ElevatedButton(
+                        onPressed: () => _resolveAlert(doc.id),
+                        child: const Text("Resolve"),
                       ),
-                      const Divider(height: 1),
-                      Expanded(
-                        child: ListView.builder(
-                            itemCount: _stops.length,
-                            itemBuilder: (context, i) => ListTile(
-                                leading: Text(_stops[i]['time'] ?? "--:--",
-                                    style: const TextStyle(
-                                        fontWeight: FontWeight.bold)),
-                                title: Text(_stops[i]['name'] ?? "Stop"))),
-                      ),
-                    ],
-                  ))),
+                    );
+                  }).toList(),
+                ),
+              ),
+            ),
         ],
       ),
     );
