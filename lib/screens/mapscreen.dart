@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:math' as math;
 import 'package:flutter/material.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
 import 'package:geolocator/geolocator.dart';
@@ -48,6 +49,9 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
   // Animation
   AnimationController? _animationController;
 
+  // 🔹 Dynamic Duration Variables
+  DateTime? _lastUpdateTime;
+
   // Tracking Variables
   LatLng? _busLocation;   
   LatLng? _deviceLatLng;  
@@ -68,7 +72,6 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
   @override
   void initState() {
     super.initState();
-    // Clear previous state data
     _busLocation = null;
     _otherBuses = {};
     _markers = {};
@@ -83,9 +86,6 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
     
     _initNotifications();
     _initLocationTracking();
-    //if (widget.isAdmin || widget.isDriver) {
-     // _startListeningToAllBuses();
-    //}
     if (widget.isAdmin) {
       _startListeningToActiveAlerts();
     }
@@ -101,32 +101,80 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
     super.dispose();
   }
 
-  void _animateBusMarker(LatLng newPosition, double newRotation) {
+  // 🔹 UPDATED: DYNAMIC DURATION ANIMATION - MATCHES HARDWARE UPDATE INTERVAL
+   void _animateBusMarker(LatLng newPosition, double newRotation) {
+    _busHeading = newRotation;
+
     if (_busLocation == null) {
       _busLocation = newPosition;
-      _busHeading = newRotation;
       _updateMapVisuals();
       return;
     }
-    if (_busLocation!.latitude == newPosition.latitude &&
-        _busLocation!.longitude == newPosition.longitude) return;
+
+    // 1. Calculate the actual distance between the current marker and the new point
+    double distanceMeters = _distanceInMeters(_busLocation!, newPosition);
+
+    // 2. STOPS NOISE: If movement is less than 2 meters, keep it still
+    if (distanceMeters < 2.0 || _busSpeed < 1.0) {
+      return; 
+    }
+
+    // 3. FIX JUMPS: If the distance is too large (> 500m), it's a GPS glitch or 
+    // the app just started. Snap to the location instead of racing across the map.
+    if (distanceMeters > 500.0) {
+      setState(() { _busLocation = newPosition; });
+      _updateMapVisuals();
+      return;
+    }
+
+    // 4. CALCULATE DYNAMIC DURATION: Time = Distance / Speed
+    // Speed is in km/h, convert to m/s by dividing by 3.6
+    double speedMetersPerSecond = _busSpeed / 3.6;
+    
+    // Calculate how many seconds it should take to travel that distance
+    double travelTimeSeconds = distanceMeters / speedMetersPerSecond;
+
+    // 5. SAFETY CAP: Ensure duration is between 1 and 10 seconds to keep it smooth
+    int finalDurationMs = (travelTimeSeconds * 1000).toInt().clamp(1000, 10000);
 
     _animationController?.stop();
+    _animationController?.dispose();
+    
     _animationController = AnimationController(
-        duration: const Duration(milliseconds: 2000), vsync: this);
+      duration: Duration(milliseconds: finalDurationMs), 
+      vsync: this
+    );
+
     final latTween = Tween<double>(begin: _busLocation!.latitude, end: newPosition.latitude);
     final lngTween = Tween<double>(begin: _busLocation!.longitude, end: newPosition.longitude);
-    final rotTween = Tween<double>(begin: _busHeading, end: newRotation);
-    final Animation<double> animation =
-        CurvedAnimation(parent: _animationController!, curve: Curves.easeInOut);
+    
+    // Linear curve ensures the bus doesn't speed up and slow down unnaturally
+    final Animation<double> animation = CurvedAnimation(
+      parent: _animationController!, 
+      curve: Curves.linear
+    );
+
     _animationController!.addListener(() {
+      if (!mounted) return;
       setState(() {
         _busLocation = LatLng(latTween.evaluate(animation), lngTween.evaluate(animation));
-        _busHeading = rotTween.evaluate(animation);
-        _updateMapVisuals();
       });
+      _updateMapVisuals();
     });
+
     _animationController!.forward();
+  }
+
+  double _distanceInMeters(LatLng a, LatLng b) {
+    const double earthRadius = 6371000.0;
+    double dLat = (b.latitude - a.latitude) * math.pi / 180.0;
+    double dLng = (b.longitude - a.longitude) * math.pi / 180.0;
+    double x = math.sin(dLat / 2) * math.sin(dLat / 2) +
+        math.cos(a.latitude * math.pi / 180.0) *
+            math.cos(b.latitude * math.pi / 180.0) *
+            math.sin(dLng / 2) *
+            math.sin(dLng / 2);
+    return earthRadius * 2 * math.atan2(math.sqrt(x), math.sqrt(1 - x));
   }
 
   void _generateAuthorizedZone(List<LatLng> stopPoints) {
@@ -171,38 +219,27 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
   }
 
   void _checkSecurityStatus(LatLng busPos) {
-    // REMOVED: if (!_isTripActive) return; 
-    // Now it will check even if the trip is not active.
-
     if (_polygonVertices.isEmpty) return;
-    
     bool isInside = _isPointInPolygon(busPos, _polygonVertices);
     String busNum = widget.routeData?['busNumber']?.toString() ?? "Unknown";
 
     if (!isInside) {
-      // Only send notification if we haven't already flagged this violation 
-      // OR if the app just started and found the bus outside.
       if (!_isViolatingRoute) {
         setState(() => _isViolatingRoute = true);
-
         if (widget.isDriver) {
           Vibration.vibrate(duration: 1000);
           _showNotification("🚨 ROUTE VIOLATION", "Warning! You are driving in unauthorized area!");
         }
-
         if (widget.isAdmin) {
           Vibration.vibrate(duration: 1000);
           _showNotification("🚨 ROUTE VIOLATION", "Bus no $busNum is outside authorized area");
         }
       }
     } else {
-      // If the bus is back inside, reset the flag so it can alert again next time it leaves
       if (_isViolatingRoute) {
         setState(() => _isViolatingRoute = false);
       }
     }
-    
-    // Always refresh the zone visual based on the stops
     _generateAuthorizedZone(_extractStopCoords());
   }
 
@@ -237,11 +274,6 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
     if (_deviceLatLng != null) {
       newMarkers.add(Marker(markerId: const MarkerId('user_location'), position: _deviceLatLng!, icon: BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueCyan), infoWindow: const InfoWindow(title: "📱 Your Position"), zIndex: 5));
     }
-    //if (widget.isAdmin || widget.isDriver) {
-     // _otherBuses.forEach((id, pos) {
-      //  newMarkers.add(Marker(markerId: MarkerId(id), position: pos, icon: BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueAzure), infoWindow: InfoWindow(title: "Other Bus: $id")));
-     // });
-    //}
     setState(() {
       _markers = newMarkers;
       _polylines = { Polyline(polylineId: const PolylineId('rl'), points: _roadPoints.isEmpty ? stopCoords : _roadPoints, color: Colors.blueAccent, width: 5) };
@@ -258,8 +290,6 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
 
   void _startListeningToBus({Map<String, dynamic>? manualData}) {
     _rtDbSubscription?.cancel();
-    
-    // Explicitly nullify old location before starting new listener
     setState(() { _busLocation = null; });
 
     String devId = (manualData?['deviceId'] ?? widget.routeData?['deviceId'] ?? "device_01").toString().trim();
@@ -276,8 +306,12 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
         double speed = double.parse((data['speed'] ?? 0.0).toString());
         double heading = double.parse((data['heading'] ?? 0.0).toString());
         LatLng newTarget = LatLng(lat, lng);
-        _animateBusMarker(newTarget, heading);
-        if (mounted) { setState(() { _busLocation = newTarget; _busSpeed = speed; _busHeading = heading; }); _checkSecurityStatus(newTarget); }
+        
+        if (mounted) { 
+          setState(() { _busSpeed = speed; }); 
+          _animateBusMarker(newTarget, heading); // 🔹 Triggers Dynamic Matching
+          _checkSecurityStatus(newTarget); 
+        }
       } catch (e) { debugPrint("RTDB Parse Error: $e"); }
     });
   }
@@ -304,23 +338,12 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
   }
 
   Future<void> _fetchRouteDataManually() async {
-    // Clear old state before manual fetch
-    setState(() {
-      _busLocation = null;
-      _otherBuses = {};
-      _markers = {};
-      _roadPoints = [];
-    });
-
+    setState(() { _busLocation = null; _otherBuses = {}; _markers = {}; _roadPoints = []; });
     DocumentSnapshot doc = await FirebaseFirestore.instance.collection('bus_schedules').doc(widget.busId).get();
     if (doc.exists) {
       var data = doc.data() as Map<String, dynamic>;
       _startListeningToBus(manualData: data);
       _loadRouteData(manualData: data);
-      // Ensure "All Buses" listener filters based on the newly fetched ID
-      if (widget.isAdmin || widget.isDriver) {
-        _startListeningToAllBuses(manualDeviceId: data['deviceId']);
-      }
     }
   }
 
@@ -336,26 +359,6 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
     int i, j = polygon.length - 1; bool oddNodes = false; double x = point.longitude; double y = point.latitude;
     for (i = 0; i < polygon.length; i++) { if ((polygon[i].latitude < y && polygon[j].latitude >= y || (polygon[j].latitude < y && polygon[i].latitude >= y)) && (polygon[i].longitude <= x || polygon[j].longitude <= x)) { if (polygon[i].longitude + (y - polygon[i].latitude) / (polygon[j].latitude - polygon[i].latitude) * (polygon[j].longitude - polygon[i].longitude) < x) oddNodes = !oddNodes; } j = i; }
     return oddNodes;
-  }
-
-  void _startListeningToAllBuses({String? manualDeviceId}) {
-    _allBusesStreamSub?.cancel();
-    String currentDeviceId = (manualDeviceId ?? widget.routeData?['deviceId'] ?? widget.busId ?? "device_01").toString();
-    
-    DatabaseReference rootRef = FirebaseDatabase.instanceFor(app: Firebase.app(), databaseURL: 'https://college-bus-tracker-33e19-default-rtdb.asia-southeast1.firebasedatabase.app').ref();
-    
-    _allBusesStreamSub = rootRef.onValue.listen((DatabaseEvent event) {
-      final data = event.snapshot.value; if (data == null || data is! Map) return; Map<String, LatLng> tempBuses = {};
-      (data as Map).forEach((key, value) { 
-        String nodeKey = key.toString(); 
-        if (nodeKey.endsWith('_live') && nodeKey != "${currentDeviceId}_live") { 
-          if (value is Map && value['latitude'] != null) { 
-            tempBuses[nodeKey.replaceAll('_live', '')] = LatLng(double.parse(value['latitude'].toString()), double.parse(value['longitude'].toString())); 
-          } 
-        } 
-      });
-      if (mounted) setState(() { _otherBuses = tempBuses; _updateMapVisuals(); });
-    });
   }
 
   Future<void> _initNotifications() async {
@@ -421,9 +424,7 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
           ),
           if (widget.isAdmin && _activeAlertDocs.isNotEmpty)
             Positioned(
-              top: 10,
-              left: 10,
-              right: 10,
+              top: 10, left: 10, right: 10,
               child: Container(
                 padding: const EdgeInsets.all(8),
                 decoration: BoxDecoration(color: Colors.red.withOpacity(0.9), borderRadius: BorderRadius.circular(8)),
@@ -432,10 +433,7 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
                     final data = doc.data() as Map<String, dynamic>;
                     return ListTile(
                       title: Text("SOS: Bus ${data['busNumber']}", style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
-                      trailing: ElevatedButton(
-                        onPressed: () => _resolveAlert(doc.id),
-                        child: const Text("Resolve"),
-                      ),
+                      trailing: ElevatedButton(onPressed: () => _resolveAlert(doc.id), child: const Text("Resolve")),
                     );
                   }).toList(),
                 ),
