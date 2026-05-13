@@ -22,6 +22,9 @@ dependencies:
   cloud_firestore: ^6.0.2
   firebase_auth: ^6.1.0
 
+  # 🌐 NETWORKING (🔹 ADDED FOR THINGSPEAK)
+  http: ^1.2.0
+
   # 🔔 NOTIFICATIONS & SENSORY ALERTS
   flutter_local_notifications: ^18.0.1 
   # 🔹 NEW: For Siren Sound on Admin Alerts
@@ -40,6 +43,7 @@ dev_dependencies:
   flutter_test:
     sdk: flutter
   flutter_lints: ^6.0.0
+  flutter_launcher_icons: ^0.13.1
 
 flutter:
   uses-material-design: true
@@ -51,5 +55,11 @@ flutter:
     - assets/images/login.png
     # 🔹 NEW: Added a sound folder for the Siren/Alarm
     - assets/sounds/siren.mp3
-    # 🔹 (Optional) Add your custom bus icon here later
-    # - assets/images/bus_marker.png
+
+# 🔹 APP ICON CONFIGURATION (ADDED)
+flutter_launcher_icons:
+  android: "launcher_icon"
+  ios: true
+  image_path: "assets/images/app_icon.png"
+  adaptive_icon_background: "#FFD31A"
+  adaptive_icon_foreground: "assets/images/app_icon.png"

@@ -10,7 +10,83 @@ import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:flutter_polyline_points/flutter_polyline_points.dart';
 import 'package:vibration/vibration.dart';
-import 'package:firebase_core/firebase_core.dart'; 
+import 'package:firebase_core/firebase_core.dart';
+import 'package:audioplayers/audioplayers.dart';
+
+// 🔹 GLOBAL SOS LISTENER - Runs independently of any screen
+class GlobalSOSListener {
+  static final GlobalSOSListener _instance = GlobalSOSListener._internal();
+  factory GlobalSOSListener() => _instance;
+  GlobalSOSListener._internal();
+
+  StreamSubscription<QuerySnapshot>? _alertsStreamSub;
+  final AudioPlayer _audioPlayer = AudioPlayer();
+  bool _isSirenPlaying = false;
+  bool _isInitialized = false;
+  bool _isAdmin = false;
+
+  void initialize(bool isAdmin) {
+    _isAdmin = isAdmin;
+    if (_isInitialized) return;
+    _isInitialized = true;
+    
+    _alertsStreamSub = FirebaseFirestore.instance
+        .collection('emergency_alerts')
+        .where('status', isEqualTo: 'ACTIVE')
+        .snapshots()
+        .listen((snapshot) {
+      // Only play siren if user is admin
+      if (_isAdmin) {
+        if (snapshot.docs.isNotEmpty && !_isSirenPlaying) {
+          _playSiren();
+        } else if (snapshot.docs.isEmpty && _isSirenPlaying) {
+          _stopSiren();
+        }
+      }
+    });
+  }
+
+  Future<void> _playSiren() async {
+    if (!_isSirenPlaying) {
+      _isSirenPlaying = true;
+      try {
+        await _audioPlayer.play(AssetSource('sounds/siren.mp3'));
+        _audioPlayer.setReleaseMode(ReleaseMode.loop);
+      } catch (e) {
+        debugPrint("Error playing siren: $e");
+      }
+    }
+  }
+
+  Future<void> _stopSiren() async {
+    if (_isSirenPlaying) {
+      await _audioPlayer.stop();
+      _isSirenPlaying = false;
+    }
+  }
+
+  void updateAdminStatus(bool isAdmin) {
+    _isAdmin = isAdmin;
+    if (!_isAdmin && _isSirenPlaying) {
+      _stopSiren();
+    }
+  }
+
+  void dispose() {
+    _alertsStreamSub?.cancel();
+    _audioPlayer.dispose();
+  }
+}
+
+// 🔹 ADD THIS AT TOP LEVEL - BEFORE MapScreen class
+class PositionBuffer {
+  final LatLng position;
+  final DateTime timestamp;
+  final double speed;
+  final double heading;
+  
+  PositionBuffer(this.position, this.timestamp, this.speed, this.heading);
+}
 
 class MapScreen extends StatefulWidget {
   final Map<String, dynamic>? routeData;
@@ -35,6 +111,10 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
   final FlutterLocalNotificationsPlugin _notificationsPlugin =
       FlutterLocalNotificationsPlugin();
   final String googleApiKey = "AIzaSyAY72QWoQntO2YvzdoifK397WcHWr5zkZo";
+  
+  // 🔹 Audio Player for SOS Siren (local - for MapScreen only)
+  final AudioPlayer _audioPlayer = AudioPlayer();
+  bool _isSirenPlaying = false;
 
   // Map Components
   Set<Marker> _markers = {};
@@ -48,9 +128,21 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
 
   // Animation
   AnimationController? _animationController;
-
-  // 🔹 Dynamic Duration Variables
+  
+  // 🔹 SMOOTH MOVEMENT VARIABLES
+  LatLng? _targetLocation;  // Where the bus actually is (from hardware)
+  LatLng? _currentDisplayLocation; // Where we show it on map (smoothly moving)
   DateTime? _lastUpdateTime;
+  bool _isAnimating = false;
+
+  // 🔹 NEW: Buffer Smooth & Timestamp Variables
+  List<PositionBuffer> _positionBuffer = [];
+  Timer? _smoothAnimationTimer;
+  DateTime? _lastHardwareUpdate;
+  int _dataAgeMs = 0;
+  bool _isDataStale = false;
+  bool _isPredicting = false;
+  static const int BUFFER_SIZE = 5;
 
   // Tracking Variables
   LatLng? _busLocation;   
@@ -60,8 +152,6 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
   bool _isViolatingRoute = false;
   bool _isSOSLoading = false;
   bool _isTripActive = false;
-
-  bool _geofenceAlertLogged = false;
 
   // Streams
   StreamSubscription<DatabaseEvent>? _rtDbSubscription;
@@ -73,8 +163,16 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
   void initState() {
     super.initState();
     _busLocation = null;
+    _currentDisplayLocation = null;
+    _targetLocation = null;
     _otherBuses = {};
     _markers = {};
+
+    // 🔹 Initialize GLOBAL SOS Listener (will ring alarm on ANY screen)
+    GlobalSOSListener().initialize(widget.isAdmin);
+    
+    // 🔹 Update admin status in global listener
+    GlobalSOSListener().updateAdminStatus(widget.isAdmin);
 
     if (widget.routeData != null) {
       _isTripActive = widget.routeData!['isTripActive'] ?? false;
@@ -86,6 +184,7 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
     
     _initNotifications();
     _initLocationTracking();
+    
     if (widget.isAdmin) {
       _startListeningToActiveAlerts();
     }
@@ -98,68 +197,309 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
     _positionStreamSub?.cancel();
     _alertsStreamSub?.cancel();
     _animationController?.dispose();
+    _smoothAnimationTimer?.cancel();
+    _audioPlayer.dispose();
     super.dispose();
   }
 
-  // 🔹 UPDATED: DYNAMIC DURATION ANIMATION - MATCHES HARDWARE UPDATE INTERVAL
-   void _animateBusMarker(LatLng newPosition, double newRotation) {
-    _busHeading = newRotation;
+  // 🔹 Play Siren for SOS Alerts (local)
+  Future<void> _playSiren() async {
+    if (!_isSirenPlaying) {
+      _isSirenPlaying = true;
+      try {
+        await _audioPlayer.play(AssetSource('sounds/siren.mp3'));
+        _audioPlayer.setReleaseMode(ReleaseMode.loop);
+      } catch (e) {
+        debugPrint("Error playing siren: $e");
+      }
+    }
+  }
 
-    if (_busLocation == null) {
-      _busLocation = newPosition;
+  // 🔹 Stop Siren (local)
+  Future<void> _stopSiren() async {
+    if (_isSirenPlaying) {
+      await _audioPlayer.stop();
+      _isSirenPlaying = false;
+    }
+  }
+
+  // 🔹 Main Handler with Timestamp Validation
+  void _handleBusUpdate(dynamic data) {
+    try {
+      int hardwareTimestamp = 0;
+      if (data['ts'] != null) {
+        hardwareTimestamp = int.parse(data['ts'].toString());
+      } else {
+        hardwareTimestamp = DateTime.now().millisecondsSinceEpoch;
+      }
+      
+      double lat = double.parse(data['latitude'].toString());
+      double lng = double.parse(data['longitude'].toString());
+      double speed = double.parse((data['speed'] ?? 0.0).toString());
+      double heading = double.parse((data['heading'] ?? 0.0).toString());
+      
+      int now = DateTime.now().millisecondsSinceEpoch;
+      _dataAgeMs = now - hardwareTimestamp;
+      
+      setState(() {
+        _lastHardwareUpdate = DateTime.fromMillisecondsSinceEpoch(hardwareTimestamp);
+        _isDataStale = _dataAgeMs > 3000;
+        _busSpeed = speed;
+      });
+      
+      if (_dataAgeMs > 15000) {
+        _setMarkerFreshness(false, false, true);
+        return;
+      }
+      
+      _addToBuffer(lat, lng, speed, heading, hardwareTimestamp);
+      
+      if (_dataAgeMs < 1000) {
+        _startSmoothAnimation();
+        _setMarkerFreshness(true, false, false);
+        _animateBusMarker(LatLng(lat, lng), heading);
+      } else if (_dataAgeMs < 5000 && speed > 2.0) {
+        _predictPosition(lat, lng, speed, heading, _dataAgeMs);
+        _setMarkerFreshness(false, true, false);
+      } else {
+        _setMarkerFreshness(false, false, false);
+        _animateBusMarker(LatLng(lat, lng), heading);
+      }
+      
+    } catch (e) {
+      debugPrint("Error in handleBusUpdate: $e");
+    }
+  }
+
+  void _addToBuffer(double lat, double lng, double speed, double heading, int timestamp) {
+    _positionBuffer.add(PositionBuffer(
+      LatLng(lat, lng), 
+      DateTime.fromMillisecondsSinceEpoch(timestamp),
+      speed,
+      heading
+    ));
+    
+    if (_positionBuffer.length > BUFFER_SIZE) {
+      _positionBuffer.removeAt(0);
+    }
+  }
+
+  void _startSmoothAnimation() {
+    _smoothAnimationTimer?.cancel();
+    
+    _smoothAnimationTimer = Timer.periodic(const Duration(milliseconds: 16), (timer) {
+      if (_positionBuffer.isEmpty || !mounted) return;
+      
+      final now = DateTime.now();
+      
+      for (int i = 0; i < _positionBuffer.length - 1; i++) {
+        if (now.isAfter(_positionBuffer[i].timestamp) && 
+            now.isBefore(_positionBuffer[i + 1].timestamp)) {
+          
+          double totalDuration = _positionBuffer[i + 1].timestamp.difference(_positionBuffer[i].timestamp).inMilliseconds.toDouble();
+          double elapsed = now.difference(_positionBuffer[i].timestamp).inMilliseconds.toDouble();
+          
+          double progress = (elapsed / totalDuration).clamp(0.0, 1.0);
+          progress = Curves.easeOutCubic.transform(progress);
+          
+          setState(() {
+            _currentDisplayLocation = LatLng(
+              _positionBuffer[i].position.latitude + 
+                  (_positionBuffer[i + 1].position.latitude - _positionBuffer[i].position.latitude) * progress,
+              _positionBuffer[i].position.longitude + 
+                  (_positionBuffer[i + 1].position.longitude - _positionBuffer[i].position.longitude) * progress,
+            );
+            _busLocation = _currentDisplayLocation;
+            _busHeading = _positionBuffer[i].heading + 
+                (_positionBuffer[i + 1].heading - _positionBuffer[i].heading) * progress;
+          });
+          
+          _updateMapVisuals();
+          return;
+        }
+      }
+      
+      setState(() {
+        _currentDisplayLocation = _positionBuffer.last.position;
+        _busLocation = _positionBuffer.last.position;
+        _busHeading = _positionBuffer.last.heading;
+      });
+    });
+  }
+
+  void _predictPosition(double lat, double lng, double speed, double heading, int dataAgeMs) {
+    double secondsSinceUpdate = dataAgeMs / 1000.0;
+    double distanceTraveled = (speed * 1000 / 3600) * secondsSinceUpdate;
+    double latOffset = distanceTraveled * math.cos(heading * math.pi / 180) / 111000;
+    double lngOffset = distanceTraveled * math.sin(heading * math.pi / 180) / 
+                      (111000 * math.cos(lat * math.pi / 180));
+    
+    LatLng predictedPosition = LatLng(
+      lat + latOffset,
+      lng + lngOffset,
+    );
+    
+    _animateBusMarker(predictedPosition, heading);
+  }
+
+  void _setMarkerFreshness(bool isFresh, bool isPredicting, bool isLost) {
+    setState(() {
+      _isDataStale = !isFresh && !isPredicting && !isLost;
+      _isPredicting = isPredicting;
+      if (isLost) {
+        _isDataStale = true;
+        _isPredicting = false;
+      }
+    });
+  }
+
+  Future<BitmapDescriptor> _getMarkerIcon() async {
+    if (_isPredicting) {
+      return BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueOrange);
+    } else if (_isDataStale) {
+      return BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueViolet);
+    } else {
+      return BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueBlue);
+    }
+  }
+
+  Widget _buildTimestampIndicator() {
+    if (_lastHardwareUpdate == null) return const SizedBox();
+    
+    Duration age = DateTime.now().difference(_lastHardwareUpdate!);
+    
+    Color color = Colors.green;
+    String text = "Live";
+    IconData icon = Icons.access_time;
+    
+    if (age.inSeconds > 10) {
+      color = Colors.red;
+      text = "Signal lost ${age.inSeconds}s ago";
+      icon = Icons.signal_wifi_off;
+    } else if (age.inSeconds > 3) {
+      color = Colors.orange;
+      text = "Delayed (${age.inSeconds}s old)";
+      icon = Icons.warning_amber;
+    }
+    
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+      decoration: BoxDecoration(
+        color: color.withOpacity(0.2),
+        borderRadius: BorderRadius.circular(12),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(icon, color: color, size: 14),
+          const SizedBox(width: 4),
+          Text(text, style: TextStyle(color: color, fontSize: 12)),
+        ],
+      ),
+    );
+  }
+
+  void _animateBusMarker(LatLng newPosition, double newRotation) {
+    if (!mounted) return;
+
+    final now = DateTime.now();
+    _targetLocation = newPosition;
+    
+    if (_currentDisplayLocation == null) {
+      setState(() {
+        _currentDisplayLocation = newPosition;
+        _busLocation = newPosition;
+        _busHeading = newRotation;
+        _lastUpdateTime = now;
+      });
       _updateMapVisuals();
       return;
     }
 
-    // 1. Calculate the actual distance between the current marker and the new point
-    double distanceMeters = _distanceInMeters(_busLocation!, newPosition);
-
-    // 2. STOPS NOISE: If movement is less than 2 meters, keep it still
-    if (distanceMeters < 2.0 || _busSpeed < 1.0) {
-      return; 
-    }
-
-    // 3. FIX JUMPS: If the distance is too large (> 500m), it's a GPS glitch or 
-    // the app just started. Snap to the location instead of racing across the map.
-    if (distanceMeters > 500.0) {
-      setState(() { _busLocation = newPosition; });
+    double distance = _distanceInMeters(_currentDisplayLocation!, newPosition);
+    
+    if (distance < 2.0) {
+      setState(() {
+        _currentDisplayLocation = newPosition;
+        _busLocation = newPosition;
+        _busHeading = newRotation;
+        _lastUpdateTime = now;
+      });
       _updateMapVisuals();
       return;
     }
 
-    // 4. CALCULATE DYNAMIC DURATION: Time = Distance / Speed
-    // Speed is in km/h, convert to m/s by dividing by 3.6
-    double speedMetersPerSecond = _busSpeed / 3.6;
-    
-    // Calculate how many seconds it should take to travel that distance
-    double travelTimeSeconds = distanceMeters / speedMetersPerSecond;
+    if (distance > 500) {
+      setState(() {
+        _currentDisplayLocation = newPosition;
+        _busLocation = newPosition;
+        _busHeading = newRotation;
+        _lastUpdateTime = now;
+      });
+      _updateMapVisuals();
+      return;
+    }
 
-    // 5. SAFETY CAP: Ensure duration is between 1 and 10 seconds to keep it smooth
-    int finalDurationMs = (travelTimeSeconds * 1000).toInt().clamp(1000, 10000);
+    Duration timeSinceLastUpdate = const Duration(seconds: 1);
+    if (_lastUpdateTime != null) {
+      timeSinceLastUpdate = now.difference(_lastUpdateTime!);
+      if (timeSinceLastUpdate > const Duration(seconds: 3)) {
+        timeSinceLastUpdate = const Duration(seconds: 1);
+      }
+    }
+    _lastUpdateTime = now;
 
-    _animationController?.stop();
-    _animationController?.dispose();
-    
+    if (_isAnimating) {
+      _animationController?.stop();
+      _animationController?.dispose();
+    }
+
     _animationController = AnimationController(
-      duration: Duration(milliseconds: finalDurationMs), 
+      duration: timeSinceLastUpdate,
       vsync: this
     );
 
-    final latTween = Tween<double>(begin: _busLocation!.latitude, end: newPosition.latitude);
-    final lngTween = Tween<double>(begin: _busLocation!.longitude, end: newPosition.longitude);
-    
-    // Linear curve ensures the bus doesn't speed up and slow down unnaturally
     final Animation<double> animation = CurvedAnimation(
       parent: _animationController!, 
-      curve: Curves.linear
+      curve: Curves.easeOutCubic
     );
 
+    final latTween = Tween<double>(
+      begin: _currentDisplayLocation!.latitude, 
+      end: newPosition.latitude
+    );
+    final lngTween = Tween<double>(
+      begin: _currentDisplayLocation!.longitude, 
+      end: newPosition.longitude
+    );
+    final rotTween = Tween<double>(
+      begin: _busHeading, 
+      end: newRotation
+    );
+
+    _isAnimating = true;
+    
     _animationController!.addListener(() {
       if (!mounted) return;
       setState(() {
-        _busLocation = LatLng(latTween.evaluate(animation), lngTween.evaluate(animation));
+        _currentDisplayLocation = LatLng(
+          latTween.evaluate(animation), 
+          lngTween.evaluate(animation)
+        );
+        _busLocation = _currentDisplayLocation;
+        _busHeading = rotTween.evaluate(animation);
       });
       _updateMapVisuals();
+    });
+
+    _animationController!.addStatusListener((status) {
+      if (status == AnimationStatus.completed) {
+        _isAnimating = false;
+        setState(() {
+          _currentDisplayLocation = newPosition;
+          _busLocation = newPosition;
+        });
+      }
     });
 
     _animationController!.forward();
@@ -220,6 +560,7 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
 
   void _checkSecurityStatus(LatLng busPos) {
     if (_polygonVertices.isEmpty) return;
+    
     bool isInside = _isPointInPolygon(busPos, _polygonVertices);
     String busNum = widget.routeData?['busNumber']?.toString() ?? "Unknown";
 
@@ -240,7 +581,6 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
         setState(() => _isViolatingRoute = false);
       }
     }
-    _generateAuthorizedZone(_extractStopCoords());
   }
 
   void _startListeningToActiveAlerts() {
@@ -262,21 +602,69 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
         .update({'status': 'RESOLVED'});
   }
 
-  void _updateMapVisuals() {
+  List<LatLng> _extractStopCoords({Map<String, dynamic>? manualData}) {
+    var data = manualData ?? widget.routeData;
+    var stopsData = data?['stops'] ?? data?['standardRoute'];
+    if (stopsData != null && stopsData is List) {
+      return stopsData.map((s) => LatLng(double.parse(s['lat'].toString()), double.parse(s['lng'].toString()))).toList();
+    }
+    return [];
+  }
+
+  void _updateMapVisuals() async {
     Set<Marker> newMarkers = {};
     List<LatLng> stopCoords = _extractStopCoords();
+
     for (int i = 0; i < stopCoords.length; i++) {
-      newMarkers.add(Marker(markerId: MarkerId('s$i'), position: stopCoords[i], icon: BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueRose), infoWindow: InfoWindow(title: i < _stops.length ? _stops[i]['name'] : "Stop")));
+      newMarkers.add(Marker(
+          markerId: MarkerId('s$i'), 
+          position: stopCoords[i], 
+          icon: BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueRose), 
+          infoWindow: InfoWindow(title: i < _stops.length ? _stops[i]['name'] : "Stop")));
     }
-    if (_busLocation != null) {
-      newMarkers.add(Marker(markerId: const MarkerId('live'), position: _busLocation!, rotation: _busHeading, anchor: const Offset(0.5, 0.5), icon: BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueBlue), infoWindow: InfoWindow(title: "📍 Live Bus Location", snippet: "${_busSpeed.toStringAsFixed(1)} km/h"), zIndex: 15));
+    
+    if (_currentDisplayLocation != null) {
+      BitmapDescriptor markerIcon = await _getMarkerIcon();
+      
+      String title = "📍 Live Bus Location";
+      if (_isPredicting) {
+        title = "⚠️ Predicting Location";
+      } else if (_isDataStale) {
+        title = "⚠️ Stale Location";
+      }
+      
+      newMarkers.add(Marker(
+          markerId: const MarkerId('live'), 
+          position: _currentDisplayLocation!, 
+          rotation: _busHeading, 
+          anchor: const Offset(0.5, 0.5), 
+          icon: markerIcon, 
+          infoWindow: InfoWindow(
+            title: title, 
+            snippet: "${_busSpeed.toStringAsFixed(1)} km/h"
+          ), 
+          zIndex: 15));
     }
+    
     if (_deviceLatLng != null) {
-      newMarkers.add(Marker(markerId: const MarkerId('user_location'), position: _deviceLatLng!, icon: BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueCyan), infoWindow: const InfoWindow(title: "📱 Your Position"), zIndex: 5));
+      newMarkers.add(Marker(
+          markerId: const MarkerId('user_location'), 
+          position: _deviceLatLng!, 
+          icon: BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueCyan), 
+          infoWindow: const InfoWindow(title: "📱 Your Position"), 
+          zIndex: 5));
     }
+
     setState(() {
       _markers = newMarkers;
-      _polylines = { Polyline(polylineId: const PolylineId('rl'), points: _roadPoints.isEmpty ? stopCoords : _roadPoints, color: Colors.blueAccent, width: 5) };
+      _polylines = { 
+        Polyline(
+          polylineId: const PolylineId('rl'), 
+          points: _roadPoints.isEmpty ? stopCoords : _roadPoints, 
+          color: Colors.blueAccent, 
+          width: 5
+        ) 
+      };
     });
   }
 
@@ -290,39 +678,36 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
 
   void _startListeningToBus({Map<String, dynamic>? manualData}) {
     _rtDbSubscription?.cancel();
-    setState(() { _busLocation = null; });
+    setState(() { 
+      _busLocation = null;
+      _currentDisplayLocation = null;
+      _targetLocation = null;
+      _positionBuffer.clear();
+    });
 
     String devId = (manualData?['deviceId'] ?? widget.routeData?['deviceId'] ?? "device_01").toString().trim();
     String nodePath = "${devId}_live";
     
-    DatabaseReference busRef = FirebaseDatabase.instanceFor(app: Firebase.app(), databaseURL: 'https://college-bus-tracker-33e19-default-rtdb.asia-southeast1.firebasedatabase.app').ref(nodePath);
+    DatabaseReference busRef = FirebaseDatabase.instanceFor(
+      app: Firebase.app(), 
+      databaseURL: 'https://college-bus-tracker-33e19-default-rtdb.asia-southeast1.firebasedatabase.app'
+    ).ref(nodePath);
     
     _rtDbSubscription = busRef.onValue.listen((DatabaseEvent event) {
       final data = event.snapshot.value;
       if (data == null || data is! Map) return;
-      try {
-        double lat = double.parse(data['latitude'].toString());
-        double lng = double.parse(data['longitude'].toString());
-        double speed = double.parse((data['speed'] ?? 0.0).toString());
-        double heading = double.parse((data['heading'] ?? 0.0).toString());
-        LatLng newTarget = LatLng(lat, lng);
-        
-        if (mounted) { 
-          setState(() { _busSpeed = speed; }); 
-          _animateBusMarker(newTarget, heading); // 🔹 Triggers Dynamic Matching
-          _checkSecurityStatus(newTarget); 
+      
+      if (mounted) { 
+        _handleBusUpdate(data);
+        if (data['latitude'] != null && data['longitude'] != null) {
+          try {
+            double lat = double.parse(data['latitude'].toString());
+            double lng = double.parse(data['longitude'].toString());
+            _checkSecurityStatus(LatLng(lat, lng));
+          } catch (e) {}
         }
-      } catch (e) { debugPrint("RTDB Parse Error: $e"); }
+      }
     });
-  }
-
-  List<LatLng> _extractStopCoords({Map<String, dynamic>? manualData}) {
-    var data = manualData ?? widget.routeData;
-    var stopsData = data?['stops'] ?? data?['standardRoute'];
-    if (stopsData != null && stopsData is List) {
-      return stopsData.map((s) => LatLng(double.parse(s['lat'].toString()), double.parse(s['lng'].toString()))).toList();
-    }
-    return [];
   }
 
   void _loadRouteData({Map<String, dynamic>? manualData}) async {
@@ -338,7 +723,15 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
   }
 
   Future<void> _fetchRouteDataManually() async {
-    setState(() { _busLocation = null; _otherBuses = {}; _markers = {}; _roadPoints = []; });
+    setState(() { 
+      _busLocation = null; 
+      _currentDisplayLocation = null;
+      _targetLocation = null;
+      _otherBuses = {}; 
+      _markers = {}; 
+      _roadPoints = [];
+      _positionBuffer.clear();
+    });
     DocumentSnapshot doc = await FirebaseFirestore.instance.collection('bus_schedules').doc(widget.busId).get();
     if (doc.exists) {
       var data = doc.data() as Map<String, dynamic>;
@@ -350,8 +743,17 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
   Future<void> _fetchRoadSnappedRoute(List<LatLng> stopPoints) async {
     PolylinePoints polylinePoints = PolylinePoints(apiKey: googleApiKey);
     try {
-      PolylineResult result = await polylinePoints.getRouteBetweenCoordinates(request: PolylineRequest(origin: PointLatLng(stopPoints.first.latitude, stopPoints.first.longitude), destination: PointLatLng(stopPoints.last.latitude, stopPoints.last.longitude), mode: TravelMode.driving));
-      if (result.points.isNotEmpty) { setState(() { _roadPoints = result.points.map((p) => LatLng(p.latitude, p.longitude)).toList(); }); }
+      PolylineResult result = await polylinePoints.getRouteBetweenCoordinates(
+        request: PolylineRequest(
+            origin: PointLatLng(stopPoints.first.latitude, stopPoints.first.longitude),
+            destination: PointLatLng(stopPoints.last.latitude, stopPoints.last.longitude),
+            mode: TravelMode.driving),
+      );
+      if (result.points.isNotEmpty) {
+        setState(() {
+          _roadPoints = result.points.map((p) => LatLng(p.latitude, p.longitude)).toList();
+        });
+      }
     } catch (e) { setState(() { _roadPoints = stopPoints; }); }
   }
 
@@ -372,13 +774,69 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
 
   Future<void> _initLocationTracking() async {
     LocationPermission p = await Geolocator.requestPermission();
-    if (p != LocationPermission.denied) { _positionStreamSub = Geolocator.getPositionStream().listen((pos) { if (mounted) setState(() { _deviceLatLng = LatLng(pos.latitude, pos.longitude); _updateMapVisuals(); }); }); }
+    if (p != LocationPermission.denied) { 
+      _positionStreamSub = Geolocator.getPositionStream().listen((pos) { 
+        if (mounted) setState(() { 
+          _deviceLatLng = LatLng(pos.latitude, pos.longitude); 
+          _updateMapVisuals(); 
+        }); 
+      }); 
+    }
   }
 
-  Future<void> _fitBounds() async { if (_controller.isCompleted && _busLocation != null) { final c = await _controller.future; c.animateCamera(CameraUpdate.newLatLngZoom(_busLocation!, 17)); } }
+  Future<void> _fitBounds() async { 
+    if (_controller.isCompleted && _currentDisplayLocation != null) { 
+      final c = await _controller.future; 
+      c.animateCamera(CameraUpdate.newLatLngZoom(_currentDisplayLocation!, 17)); 
+    } 
+  }
 
-  void _showSOSConfirmDialog() {
-    showDialog(context: context, builder: (ctx) => AlertDialog(title: const Text("🚨 Send SOS?"), content: const Text("Notify management that you are in danger."), actions: [TextButton(onPressed: () => Navigator.pop(ctx), child: const Text("CANCEL")), ElevatedButton(style: ElevatedButton.styleFrom(backgroundColor: Colors.red), onPressed: () { Navigator.pop(ctx); _sendSilentSOS(); }, child: const Text("SEND SOS"))]));
+ void _showSOSConfirmDialog() {
+    // 1. 🔹 Proximity Validation: Only for Students
+    // Drivers are exempt as they might be standing outside a broken-down bus.
+    if (!widget.isAdmin && !widget.isDriver) {
+      if (_deviceLatLng != null && _busLocation != null) {
+        double distance = _distanceInMeters(_deviceLatLng!, _busLocation!);
+        
+        // Threshold set to 15 meters to account for GPS drift
+        if (distance > 15.0) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text("❌ SOS Denied: You are ${distance.toStringAsFixed(0)}m away. You must be on the bus to trigger an alert."),
+              backgroundColor: Colors.redAccent,
+              behavior: SnackBarBehavior.floating,
+            ),
+          );
+          return; // 🔹 STOP: Do not show the dialog or send the SOS
+        }
+      } else {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text("📍 Waiting for GPS to verify your proximity to the bus..."))
+        );
+        return;
+      }
+    }
+
+    // 2. 🔹 Normal Dialog logic (runs if proximity check passes)
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text("🚨 Send SOS?"),
+        content: const Text("Notify management that you are in danger."),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text("CANCEL")),
+          ElevatedButton(
+            style: ElevatedButton.styleFrom(backgroundColor: Colors.red),
+            onPressed: () {
+              Navigator.pop(ctx);
+              _sendSilentSOS();
+              // Optional: Add a cooldown logic here if needed
+            },
+            child: const Text("SEND SOS"),
+          ),
+        ],
+      ),
+    );
   }
 
   Future<void> _triggerEmergency({required String type, String? detail}) async {
@@ -402,7 +860,15 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
   Widget build(BuildContext context) {
     final bool isDark = Theme.of(context).brightness == Brightness.dark;
     return Scaffold(
-      appBar: AppBar(title: Text(widget.routeData?['busNumber']?.toString() ?? 'Bus Tracker')),
+      appBar: AppBar(
+        title: Text(widget.routeData?['busNumber']?.toString() ?? 'MECTrack'),
+        actions: [
+          Padding(
+            padding: const EdgeInsets.only(right: 16.0),
+            child: _buildTimestampIndicator(),
+          ),
+        ],
+      ),
       floatingActionButton: Column(
         mainAxisAlignment: MainAxisAlignment.end,
         children: [
@@ -418,8 +884,37 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
           Column(
             children: [
               if (_isViolatingRoute && (widget.isAdmin || widget.isDriver)) Container(width: double.infinity, color: Colors.red, padding: const EdgeInsets.all(10), child: const Center(child: Text("VEHICLE OUTSIDE AUTHORIZED AREA", style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold)))),
-              Expanded(flex: 7, child: GoogleMap(initialCameraPosition: const CameraPosition(target: LatLng(8.5576, 76.8604), zoom: 14), markers: _markers, polylines: _polylines, polygons: (widget.isAdmin || widget.isDriver) ? _polygons : {}, myLocationEnabled: true, onMapCreated: (c) => _controller.complete(c))),
-              Expanded(flex: 3, child: Container(color: isDark ? const Color(0xFF121212) : Colors.white, child: Column(children: [Container(width: double.infinity, padding: const EdgeInsets.symmetric(vertical: 8), color: _isTripActive ? Colors.green.withOpacity(0.1) : Colors.orange.withOpacity(0.1), child: Center(child: Text(_isTripActive ? "Status: On Route" : "Status: Trip Not Started / In Depot", style: TextStyle(color: _isTripActive ? Colors.green : Colors.orange.shade900, fontWeight: FontWeight.bold, fontSize: 14)))), const Divider(height: 1), Expanded(child: ListView.builder(itemCount: _stops.length, itemBuilder: (context, i) => ListTile(leading: Text(_stops[i]['time'] ?? "--:--", style: const TextStyle(fontWeight: FontWeight.bold)), title: Text(_stops[i]['name'] ?? "Stop"))))]))),
+              Expanded(flex: 7, child: GoogleMap(
+                initialCameraPosition: const CameraPosition(target: LatLng(8.5576, 76.8604), zoom: 14), 
+                markers: _markers, 
+                polylines: _polylines, 
+                polygons: (widget.isAdmin || widget.isDriver) ? _polygons : {}, 
+                myLocationEnabled: true, 
+                onMapCreated: (c) => _controller.complete(c)
+              )),
+              Expanded(flex: 3, child: Container(color: isDark ? const Color(0xFF121212) : Colors.white, child: Column(children: [
+                Container(
+                  width: double.infinity, 
+                  padding: const EdgeInsets.symmetric(vertical: 8), 
+                  color: _isTripActive ? Colors.green.withOpacity(0.1) : Colors.orange.withOpacity(0.1), 
+                  child: Center(child: Text(
+                    _isTripActive ? "Status: On Route" : "Status: Trip Not Started / In Depot", 
+                    style: TextStyle(
+                      color: _isTripActive ? Colors.green : Colors.orange.shade900, 
+                      fontWeight: FontWeight.bold, 
+                      fontSize: 14
+                    )
+                  ))
+                ), 
+                const Divider(height: 1), 
+                Expanded(child: ListView.builder(
+                  itemCount: _stops.length, 
+                  itemBuilder: (context, i) => ListTile(
+                    leading: Text(_stops[i]['time'] ?? "--:--", style: const TextStyle(fontWeight: FontWeight.bold)), 
+                    title: Text(_stops[i]['name'] ?? "Stop")
+                  )
+                ))
+              ]))),
             ],
           ),
           if (widget.isAdmin && _activeAlertDocs.isNotEmpty)

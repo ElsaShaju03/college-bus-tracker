@@ -202,7 +202,6 @@ class BusScheduleScreen extends StatelessWidget {
               child: Padding(
                 padding: const EdgeInsets.fromLTRB(20, 30, 20, 0),
                 child: StreamBuilder<QuerySnapshot>(
-                  // 🔹 LOGIC: Admin sees all, Student sees only 'isActive' buses
                   stream: isAdmin
                       ? FirebaseFirestore.instance.collection('bus_schedules').orderBy('createdAt', descending: true).snapshots()
                       : FirebaseFirestore.instance.collection('bus_schedules').where('isActive', isEqualTo: true).snapshots(),
@@ -220,8 +219,8 @@ class BusScheduleScreen extends StatelessWidget {
                       itemBuilder: (context, index) {
                         var doc = buses[index]; 
                         var data = doc.data() as Map<String, dynamic>;
-                        bool adminActive = data['isActive'] ?? false; // Visibility
-                        bool tripLive = data['isTripActive'] ?? false; // LIVE badge
+                        bool adminActive = data['isActive'] ?? false; 
+                        bool tripLive = data['isTripActive'] ?? false; 
 
                         return GestureDetector(
                           onTap: () {
@@ -251,7 +250,6 @@ class BusScheduleScreen extends StatelessWidget {
                                         children: [
                                           Text(data['busNumber'] ?? "Bus No.", style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: Colors.white)),
                                           const SizedBox(width: 8),
-                                          // 🔹 LIVE Badge: ONLY visible if Driver started trip
                                           if (tripLive)
                                             Container(
                                               padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
@@ -265,7 +263,6 @@ class BusScheduleScreen extends StatelessWidget {
                                   ),
                                 ),
                                 
-                                // 🔹 ADMIN TOGGLE: Sets visibility for students
                                 if (isAdmin) ...[
                                   Column(
                                     children: [
@@ -282,6 +279,11 @@ class BusScheduleScreen extends StatelessWidget {
                                   IconButton(
                                     icon: const Icon(Icons.swap_horiz, color: Colors.orangeAccent),
                                     onPressed: () => _showSwapDeviceDialog(context, doc.id, data['deviceId'] ?? "", data['busNumber'] ?? "Bus"),
+                                  ),
+                                  // Added Edit Button for Admin
+                                  IconButton(
+                                    icon: const Icon(Icons.edit, color: Colors.white70),
+                                    onPressed: () => Navigator.push(context, MaterialPageRoute(builder: (context) => EditRouteScreen(busId: doc.id, busNumber: data['busNumber'] ?? "Bus"))),
                                   ),
                                   IconButton(
                                     icon: const Icon(Icons.delete, color: Colors.redAccent),

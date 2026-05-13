@@ -94,7 +94,7 @@ class _LoginScreenState extends State<LoginScreen> {
                 ),
                 const SizedBox(height: 10),
                 const Text(
-                  "BUS TRACKER",
+                  "MECTrack",
                   style: TextStyle(
                     color: Colors.black,
                     fontSize: 18,
